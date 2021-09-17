@@ -8,6 +8,6 @@ How to configure your environment, please refer to https://blog.csdn.net/kkxi123
 
 # Datasets
 We provide the Burgers equation, Darcy flow, and Navier-Stokes equation datasets we used in the paper. The data generation configuration can be found in the paper.
-!(图片)E:\my_projects\MultiScale_PDE\PDE_MscaleGKN(tf1)\data\data.jpg
+![Image text](E:\my_projects\MultiScale_PDE\PDE_MscaleGKN(tf1)\data\data.jpg)
 
 # Citations
