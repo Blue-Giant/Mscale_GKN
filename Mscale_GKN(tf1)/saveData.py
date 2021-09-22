@@ -162,17 +162,10 @@ def save_testMSE_REL2mat(Mse_data, Rel_data, actName=None, outPath=None):
 
 
 # 按误差类别保存，MSE和REL
-def save_testErrors2mat(err_sReLU, err_s2ReLU, errName=None, outPath=None):
-    if str.upper(errName) == 'MSE':
-        outFile2data = '%s/MSE.mat' % (outPath)
-        key2mat_1 = 'mse2sReLU'
-        key2mat_2 = 'mse2s2ReLU'
-        scio.savemat(outFile2data, {key2mat_1: err_sReLU, key2mat_2: err_s2ReLU})
-    elif str.upper(errName) == 'REL':
-        outFile2data = '%s/REL.mat' % (outPath)
-        key2mat_1 = 'rel2sReLU'
-        key2mat_2 = 'rel2s2ReLU'
-        scio.savemat(outFile2data, {key2mat_1: err_sReLU, key2mat_2: err_s2ReLU})
+def save_testErr2mat(data2err, errName=None, outPath=None):
+    outFile2data = '%s/%s.mat' % (outPath, str(errName))
+    key2mat = str(errName)
+    scio.savemat(outFile2data, {key2mat: data2err})
 
 
 def save_test_point_wise_err2mat(data2point_wise_err, actName=None, outPath=None):

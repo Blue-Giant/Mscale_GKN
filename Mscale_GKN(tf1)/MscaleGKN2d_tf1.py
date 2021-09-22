@@ -60,6 +60,7 @@ def dictionary_out2file(R_dic, log_fileout):
     MGKN_tools.log_string('The num of sampling point for each-batch-train-data: %s\n' % str(R['numSamples2train']), log_fileout)
     MGKN_tools.log_string('The num of neighbors for training process: %s\n' % str(R['num_neighbor2train']), log_fileout)
 
+    MGKN_tools.log_string('The model for getting test-data: %s\n' % R['getData_model2test'], log_fileout)
     MGKN_tools.log_string('The resolution for test-data: %s\n' % str(R['mesh_number2test']), log_fileout)
     MGKN_tools.log_string(
         'The point_num(=res*res) for test-data: %s\n' % str(R['mesh_number2test'] * R['mesh_number2test']), log_fileout)
@@ -115,10 +116,12 @@ def solve_multiScale_operator(R):
 
     point_num2train = res2train * res2train
     point_num2test = res2test * res2test
-    numSamples = R['numSamples2train']
+    point_samples2train = R['numSamples2train']
 
     penalty2WB = R['regular_weight_biases']                # Regularization parameter for weights and biases
     lr_decay = R['learning_rate_decay']
+
+    penaltyTP = R['penalty2true_predict']
 
     input_dim = R['input_dim']
     out_dim = R['output_dim']
@@ -126,7 +129,6 @@ def solve_multiScale_operator(R):
     hidden2input = R['hiddens2input']
     hidden2Kernel = R['hiddens2kernel']
 
-    # 初始化权重和和偏置
     flag2Input = 'WB2Input'
     if R['model2input'] == 'Fourier_DNN':
         W2Input, B2Input = DNN_base.Xavier_init_NN_Fourier(input_dim + 1, out_dim, hidden2input, flag2Input)
@@ -142,45 +144,37 @@ def solve_multiScale_operator(R):
     mat2cen = tf.constant([[1, 0, 0, 0],
                            [0, 1, 0, 0]], dtype=tf.float32)
     mat2nei = tf.constant([[0, 0, 1, 0],
-                                [0, 0, 0, 1]], dtype=tf.float32)
+                           [0, 0, 0, 1]], dtype=tf.float32)
     mat_repeat2it2train = tf.ones([R['num_neighbor2train'], 1], dtype=tf.float32)
 
     mat_repeat2it2test = tf.ones([R['num_neighbor2test'], 1], dtype=tf.float32)
 
+    # training our model
     global_steps = tf.Variable(0, trainable=False)
     with tf.device('/gpu:%s' % (R['gpuNo'])):
-        with tf.variable_scope('vscope', reuse=tf.AUTO_REUSE):
-            XY2train = tf.placeholder(tf.float32, name='XY2train', shape=[point_num2train, input_dim])
-            U2train = tf.placeholder(tf.float32, name='U2train', shape=[batch2train, point_num2train, 1])
-            Aeps2train = tf.placeholder(tf.float32, name='Aeps2train', shape=[batch2train, point_num2train, 1])
-            Indexes2train = tf.placeholder(tf.int32, name='indexes2train', shape=[numSamples, ])
-
-            XY2test = tf.placeholder(tf.float32, name='XY2test', shape=[point_num2test, input_dim])
-            U2test = tf.placeholder(tf.float32, name='U2test', shape=[point_num2test, 1])
-            Aeps2test = tf.placeholder(tf.float32, name='Aeps2test', shape=[point_num2test, 1])
-
-            in_learning_rate = tf.placeholder_with_default(input=1e-5, shape=[], name='lr')
+        with tf.compat.v1.variable_scope('vscope2train', reuse=tf.compat.v1.AUTO_REUSE):
+            XY2train = tf.compat.v1.placeholder(tf.float32, name='XY2train', shape=[point_samples2train, input_dim])
+            U2train = tf.compat.v1.placeholder(tf.float32, name='U2train', shape=[batch2train, point_samples2train, 1])
+            Aeps2train = tf.compat.v1.placeholder(tf.float32, name='Aeps2train', shape=[batch2train, point_samples2train, 1])
+            in_learning_rate = tf.compat.v1.placeholder_with_default(input=1e-5, shape=[], name='lr')
 
             train_mses = 0
             train_rels = 0
             loss2U = 0
             for i_batch in range(batch2train):
-                train_points = tf.gather(XY2train, axis=0, indices=Indexes2train)
-                train_U = tf.reshape(U2train[i_batch, :, :], [-1, 1])
-                sample_train_U = tf.gather(train_U, axis=0, indices=Indexes2train)
-                train_Aeps = tf.reshape(Aeps2train[i_batch, :, :], [-1, 1])
-                sample_train_A = tf.gather(train_Aeps, axis=0, indices=Indexes2train)
+                sample_train_U = U2train[i_batch, :]
+                sample_train_A = Aeps2train[i_batch, :]
 
-                adj_matrix2train = DNN_base.pairwise_distance(train_points)
+                adj_matrix2train = DNN_base.pairwise_distance(XY2train)
                 knn_idx2train = DNN_base.knn_includeself(adj_matrix2train, k=R['num_neighbor2train'])
-                neighbors2train = tf.gather(train_points, knn_idx2train, axis=0)
-                expand_train_point = tf.expand_dims(train_points, axis=-2)
+                neighbors2train = tf.gather(XY2train, knn_idx2train, axis=0)
+                expand_train_point = tf.expand_dims(XY2train, axis=-2)
                 centroid2train = tf.matmul(mat_repeat2it2train, expand_train_point)
                 edges2train = centroid2train - neighbors2train
 
                 # calculating the wight-coefficients of neighbors by edge     # (num_points, 1, k_neighbor)
                 attend_coeff2train = DNN_base.cal_attends2neighbors(edges2train, dis_model='L2')
-                XY_Aeps2train = tf.concat([train_points, sample_train_A], axis=-1)
+                XY_Aeps2train = tf.concat([XY2train, sample_train_A], axis=-1)
                 if R['model2input'] == 'DNN':
                     VNN2train = DNN_base.DNN(XY_Aeps2train, W2Input, B2Input, hidden2input,
                                              activateIn_name=R['actInFunc2input'], activate_name=R['actFunc2input'],
@@ -220,12 +214,12 @@ def solve_multiScale_operator(R):
                 # remove the dimension with 1 (num_points, 1)
                 UMGKN2train = tf.squeeze(attend_solu2train, axis=-2)
 
-                loss2train_U = tf.reduce_mean(tf.square(UMGKN2train - sample_train_U))
+                loss2train_U = tf.reduce_mean(tf.square(penaltyTP*UMGKN2train - penaltyTP*sample_train_U))
                 loss2U = loss2U + loss2train_U/batch2train
 
-                mse2train = tf.reduce_mean(tf.square(UMGKN2train - sample_train_U))
-                rel2train = mse2train/tf.reduce_mean(tf.square(sample_train_U))
-                train_mses = train_mses + mse2train/batch2train
+                mse2train = tf.reduce_mean(tf.square(penaltyTP*UMGKN2train - penaltyTP*sample_train_U))
+                rel2train = mse2train/tf.reduce_mean(tf.square(penaltyTP*sample_train_U))
+                train_mses = train_mses + mse2train/(penaltyTP*penaltyTP*batch2train)
                 train_rels = train_rels + rel2train/batch2train
 
             if R['regular_weight_model'] == 'L1':
@@ -241,6 +235,13 @@ def solve_multiScale_operator(R):
             loss = loss2U + PWB
             my_optimizer = tf.train.AdamOptimizer(in_learning_rate)
             train_my_loss = my_optimizer.minimize(loss, global_step=global_steps)
+
+    # testing our model
+    with tf.device('/gpu:%s' % (R['gpuNo'])):
+        with tf.compat.v1.variable_scope('vscope2test', reuse=tf.compat.v1.AUTO_REUSE):
+            XY2test = tf.compat.v1.placeholder(tf.float32, name='XY2test', shape=[point_num2test, input_dim])
+            U2test = tf.compat.v1.placeholder(tf.float32, name='U2test', shape=[point_num2test, 1])
+            Aeps2test = tf.compat.v1.placeholder(tf.float32, name='Aeps2test', shape=[point_num2test, 1])
 
             adj_matrix2test = DNN_base.pairwise_distance(XY2test)
             knn_idx2test = DNN_base.knn_includeself(adj_matrix2test, k=R['num_neighbor2test'])
@@ -293,9 +294,13 @@ def solve_multiScale_operator(R):
             test_mse = tf.reduce_mean(tf.square(UMGKN2test - U2test))
             test_rel = test_mse / tf.reduce_mean(tf.square(U2test))
 
-    # 载入数据
+            test_l2Err_fenzi = tf.reduce_sum(tf.square(UMGKN2test - U2test))
+            test_l2Err_fenmu = tf.reduce_sum(tf.square(U2test))
+            test_l2rel = tf.sqrt(test_l2Err_fenzi) / tf.sqrt(test_l2Err_fenmu)
+
+    # Load the training and testing dataSet
     if R['PDE_type'] == 'pLaplace_implicit':
-        # fileName2data = 'data/' + 'res258_a4_f1' + str('.mat')
+        # For example fileName2data = 'data/' + 'res258_a4_f1' + str('.mat')
         if R['equa_name'] == 'multi_scale2D_2':
             fileName2train_data = 'data/' + 'res' + str(res2train) + '_a2_f1_train' + str('.mat')
             fileName2test_data = 'data/' + 'res' + str(res2test) + '_a2_f1_test' + str('.mat')
@@ -303,45 +308,64 @@ def solve_multiScale_operator(R):
             fileName2train_data = 'data/' + 'res' + str(res2train) + '_a3_f1_train' + str('.mat')
             fileName2test_data = 'data/' + 'res' + str(res2test) + '_a3_f1_test' + str('.mat')
         elif R['equa_name'] == 'multi_scale2D_4':
-            fileName2train_data = 'data/' + 'res' + str(res2train) + '_a4_f1_train' + str('.mat')
-            fileName2test_data = 'data/' + 'res' + str(res2test) + '_a4_f1_test' + str('.mat')
+            fileName2train_data = 'data/sample_data2fine_mesh/' + 'res' + str(res2train) + '_a4_f1_train' + str('.mat')
+            fileName2test_data = 'data/sample_data2fine_mesh/' + 'res' + str(res2test) + '_a4_f1_test' + str('.mat')
+            fileName2test_index = 'data/sample_data2fine_mesh/' + 'disorder_index' + str(res2test) + str('.mat')
 
-    train_data = matData2pLaplace.load_Matlab_data(fileName2train_data)
-    train_data_Aeps = train_data['meshA']
-    train_data_solu = train_data['meshU']
-    train_data_mesh = train_data['meshXY']
+    train_dataSet = matData2pLaplace.load_Matlab_data(fileName2train_data)
+    train_data_Aeps = train_dataSet['meshA']
+    train_data_solu = train_dataSet['meshU']
+    train_data_mesh = train_dataSet['meshXY']
 
     shape2data = np.shape(train_data_Aeps)
 
-    trans_A2train = np.reshape(train_data_Aeps, newshape=[shape2data[0], res2train * res2train])
-    trans_U2train = np.reshape(train_data_solu, newshape=[shape2data[0], res2train * res2train])
-    trans_mesh2train = np.transpose(train_data_mesh, (1, 0))
+    trainData2Aeps = np.reshape(train_data_Aeps, newshape=[shape2data[0], res2train * res2train])
+    trainData2solu = np.reshape(train_data_solu, newshape=[shape2data[0], res2train * res2train])
+    mesh2train = np.transpose(train_data_mesh, (1, 0))
 
     # 对数据进行归一化处理
-    A_normalizer2train = DNN_Class_base.np_GaussianNormalizer(trans_A2train)
-    normalize_Aeps2train = A_normalizer2train.encode(trans_A2train)
+    trainData2Aeps_normalizer = DNN_Class_base.np_GaussianNormalizer(trainData2Aeps)
+    normalize_trainData2Aeps = trainData2Aeps_normalizer.encode(trainData2Aeps)
 
-    # Train_Aeps = np.reshape(normalize_Aeps2train[0:batch2train, :], newshape=[batch2train, res2train * res2train, 1])
-    # Train_U = np.reshape(trans_U2train[0:batch2train, :], newshape=[batch2train, res2train * res2train, 1])
+    data2indexes = matData2pLaplace.load_Matlab_data(fileName2test_index)
+    disorder_index2test_data = np.reshape(data2indexes['disorder_index'], newshape=(-1))
+    if 'load_test_data' == R['getData_model2test']:
+        max_batch_size2train = shape2data[0]    # 训练集batch size的大小：选为全部batch作为训练集
+        test_dataSet = matData2pLaplace.load_Matlab_data(fileName2test_data)
+        test_data_Aeps = test_dataSet['meshA']
+        test_data_solu = test_dataSet['meshU']
+        test_data_mesh = test_dataSet['meshXY']
 
-    test_data = matData2pLaplace.load_Matlab_data(fileName2test_data)
-    test_data_Aeps = test_data['meshA']
-    test_data_solu = test_data['meshU']
-    test_data_mesh = test_data['meshXY']
+        testData2Aeps = np.reshape(test_data_Aeps, newshape=[1, res2test * res2test])
+        testData2solu = np.reshape(test_data_solu, newshape=[1, res2test * res2test])
 
-    test_trans_A = np.reshape(test_data_Aeps, newshape=[1, res2test * res2test])
-    test_trans_U = np.reshape(test_data_solu, newshape=[1, res2test * res2test])
-    test_trans_mesh = np.transpose(test_data_mesh, (1, 0))
+        testData2Aeps_normlizer = DNN_Class_base.np_GaussianNormalizer(testData2Aeps)
+        normalize_testData2Aeps = testData2Aeps_normlizer.encode(testData2Aeps)
 
-    A_normalizer2test = DNN_Class_base.np_GaussianNormalizer(test_trans_A)
-    normalize_Aeps2test = A_normalizer2test.encode(test_trans_A)
+        shuffle_norm_testData2Aeps = normalize_testData2Aeps[:, disorder_index2test_data]
+        shuffle_testData2solu = testData2solu[:, disorder_index2test_data]
+        shuffle_testData2mesh = test_data_mesh[:, disorder_index2test_data]
+    elif 'split_train_data' == R['getData_model2test']:
+        max_batch_size2train = 400   # 训练集batch size的大小：选为前400个数据条目作为训练集
 
-    Test_Aeps = np.reshape(normalize_Aeps2test, newshape=[res2test * res2test, 1])
-    Test_U = np.reshape(test_trans_U, newshape=[res2test * res2test, 1])
+        # temp = np.reshape(normalize_trainData2Aeps[401, :], newshape=[res2test * res2test, 1])
+        # shuffle_temp = temp[disorder_index2test_data, :]
+
+        normalize_testData2Aeps = normalize_trainData2Aeps[450:450+batch2test, :]
+        testData2solu = trainData2solu[450:450+batch2test, :]
+
+        shuffle_norm_testData2Aeps = normalize_testData2Aeps[:, disorder_index2test_data]
+        shuffle_testData2solu = testData2solu[:, disorder_index2test_data]
+        test_data_mesh = train_data_mesh
+        shuffle_testData2mesh = test_data_mesh[:, disorder_index2test_data]
+
+    Test_Aeps = np.transpose(shuffle_norm_testData2Aeps, (1, 0))
+    Test_U = np.transpose(shuffle_testData2solu, (1, 0))
+    mesh2test = np.transpose(shuffle_testData2mesh, (1, 0))
 
     t0 = time.time()
     loss_all, train_mse_all, train_rel_all = [], [], []  # 空列表, 使用 append() 添加元素
-    test_mse_all, test_rel_all = [], []
+    test_mse_all, test_rel_all, test_l2rel_all = [], [], []
     test_epoch = []
 
     # ConfigProto 加上allow_soft_placement=True就可以使用 gpu 了
@@ -353,22 +377,21 @@ def solve_multiScale_operator(R):
         sess.run(tf.global_variables_initializer())
         for i_epoch in range(R['max_epoch'] + 1):
             if i_epoch % 100 == 0:
-                index2sample_batch = np.random.randint(shape2data[0], size=batch2train)
+                index2sample_batch = np.random.randint(max_batch_size2train, size=batch2train)
                 print('The index for sample_batch to train-data: %s\n' % str(index2sample_batch))
                 MGKN_tools.log_string('The index for sample_batch to train-data: %s\n' % str(index2sample_batch), log_fileout)
-                Train_Aeps = np.reshape(normalize_Aeps2train[index2sample_batch, :],
-                                        newshape=[batch2train, res2train * res2train, 1])
-                Train_U = np.reshape(trans_U2train[index2sample_batch, :],
-                                     newshape=[batch2train, res2train * res2train, 1])
+                sampleBatch2Train_Aeps = normalize_trainData2Aeps[index2sample_batch, :]
+                sampleBatch2Train_U = trainData2solu[index2sample_batch, :]
+
             tmp_lr = tmp_lr * (1 - lr_decay)
-            indexes2sample_point = np.random.randint(point_num2train, size=numSamples)
+            indexes2sample_point = np.random.randint(point_num2train, size=point_samples2train)
+            sample_points2train = mesh2train[indexes2sample_point, :]
+            samples2sampleBatch_TrainAeps = np.expand_dims(sampleBatch2Train_Aeps[:, indexes2sample_point], axis=-1)
+            samples2sampleBatch_TrainU = np.expand_dims(sampleBatch2Train_U[:, indexes2sample_point], axis=-1)
             _, loss_tmp, train_mse_tmp, train_rel_tmp, pwb = sess.run(
                 [train_my_loss, loss, train_mses, train_rels, PWB],
-                feed_dict={XY2train: trans_mesh2train, U2train: Train_U, Aeps2train: Train_Aeps,
-                           Indexes2train: indexes2sample_point, in_learning_rate: tmp_lr})
-            # vnn2train, Kernel_mat = sess.run([VNN2train, kernel2train], feed_dict={
-            #     XY2train: trans_mesh2train, U2train: Train_U, Aeps2train: Train_Aeps, Indexes2train:
-            #     indexes2sample_point, in_learning_rate: tmp_lr})
+                feed_dict={XY2train: sample_points2train, U2train: samples2sampleBatch_TrainU,
+                           Aeps2train: samples2sampleBatch_TrainAeps, in_learning_rate: tmp_lr})
 
             loss_all.append(loss_tmp)
             train_mse_all.append(train_mse_tmp)
@@ -380,12 +403,13 @@ def solve_multiScale_operator(R):
                 print_and_log_train_one_epoch(i_epoch, run_times, tmp_lr, pwb, loss_tmp, train_mse_tmp, train_rel_tmp,
                                               log_out=log_fileout)
 
-                unn2test, test_mse_tmp, test_rel_tmp = sess.run(
-                    [UMGKN2test, test_mse, test_rel], feed_dict={XY2test: test_trans_mesh, Aeps2test: Test_Aeps,
-                                                                 U2test: Test_U})
+                unn2test, test_mse_tmp, test_rel_tmp, test_l2rel_tmp = sess.run(
+                    [UMGKN2test, test_mse, test_rel, test_l2rel], feed_dict={XY2test: mesh2test, Aeps2test: Test_Aeps,
+                                                                             U2test: Test_U})
                 test_mse_all.append(test_mse_tmp)
                 test_rel_all.append(test_rel_tmp)
-                MGKN_tools.print_and_log_test_one_epoch(test_mse_tmp, test_rel_tmp, log_out=log_fileout)
+                test_l2rel_all.append(test_l2rel_tmp)
+                MGKN_tools.print_and_log_test1epoch(test_mse_tmp, test_rel_tmp, test_l2rel_tmp, log_out=log_fileout)
 
     # ------------------- save the testing results into mat file and plot them -------------------------
     saveData.save_trainLoss2mat(loss_all, lossName='loss', outPath=R['FolderName'])
@@ -400,6 +424,7 @@ def solve_multiScale_operator(R):
                                  outPath=R['FolderName'])
 
     saveData.save_testMSE_REL2mat(test_mse_all, test_rel_all, actName=R['actInFunc2input'], outPath=R['FolderName'])
+    saveData.save_testErr2mat(test_l2rel_all, errName='l2Err', outPath=R['FolderName'])
     plotData.plotTest_MSE_REL(test_mse_all, test_rel_all, test_epoch, actName=R['actInFunc2input'],
                               seedNo=R['seed'], outPath=R['FolderName'], yaxis_scale=True)
 
@@ -412,11 +437,10 @@ if __name__ == "__main__":
         os.environ["CDUA_VISIBLE_DEVICES"] = "%s" % (R['gpuNo'])
     else:
         print('-------------------------------------- linux -----------------------------------------------')
-        # Linux终端没有GUI, 需要添加如下代码，而且必须添加在 import matplotlib.pyplot 之前，否则无效。
         matplotlib.use('Agg')
 
         if tf.test.is_gpu_available():
-            os.environ["CUDA_VISIBLE_DEVICES"] = "0,1"  # 设置当前使用的GPU设备仅为第 0,1,2,3 块GPU, 设备名称为'/gpu:0'
+            os.environ["CUDA_VISIBLE_DEVICES"] = "0,1"  # 设置当前使用的GPU设备仅为第 0,1 块GPU, 设备名称为'/gpu:0'
         else:
             os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 
@@ -491,23 +515,61 @@ if __name__ == "__main__":
         R['order2pLaplace_operator'] = 2
 
     # R['getData_model2train'] = 'random_generate'
-    R['getData_model2train'] = 'load_data'
+    R['getData_model2train'] = 'load_train_data'
 
     # R['getData_model2test'] = 'random_generate'
-    R['getData_model2test'] = 'load_data'
+    # R['getData_model2test'] = 'load_test_data'
+    R['getData_model2test'] = 'split_train_data'
 
     R['mesh_number2train'] = 66
     R['mesh_number2test'] = 66
 
-    R['num_neighbor2train'] = 250
-    # R['num_neighbor2train'] = 200
-    R['num_neighbor2test'] = 400
+    # R['mesh_number2train'] = 130
+    # R['mesh_number2test'] = 130
 
-    # R['batch2train'] = 3
-    R['batch2train'] = 20
-    R['batch2test'] = 1
+    if 130 == R['mesh_number2train']:
+        # R['batch2train'] = 3
+        # R['batch2train'] = 10
+        R['batch2train'] = 15
+        R['batch2test'] = 1
 
-    R['numSamples2train'] = 1000
+        # R['numSamples2train'] = 1000
+        # R['numSamples2train'] = 2000
+        R['numSamples2train'] = 3000
+        # R['numSamples2train'] = 4000
+
+        # R['num_neighbor2train'] = 250
+        # R['num_neighbor2train'] = 400
+        R['num_neighbor2train'] = 500
+        # R['num_neighbor2train'] = 1000
+        # R['num_neighbor2train'] = 200
+    elif 66 == R['mesh_number2train']:
+        # R['batch2train'] = 3
+        R['batch2train'] = 20
+        R['batch2test'] = 1
+        # R['numSamples2train'] = 1000
+        R['numSamples2train'] = 1500
+
+        R['num_neighbor2train'] = 150
+        # R['num_neighbor2train'] = 200
+        # R['num_neighbor2train'] = 250
+
+    if 130 == R['mesh_number2test']:
+        # R['num_neighbor2test'] = 100
+        # R['num_neighbor2test'] = 200
+        # R['num_neighbor2test'] = 250
+        # R['num_neighbor2test'] = 400
+        # R['num_neighbor2test'] = 700
+        R['num_neighbor2test'] = 800
+        # R['num_neighbor2test'] = 900
+        # R['num_neighbor2test'] = 1000
+        # R['num_neighbor2test'] = 1500
+    elif 66 == R['mesh_number2test']:
+        # R['num_neighbor2test'] = 100
+        # R['num_neighbor2test'] = 200
+        # R['num_neighbor2test'] = 250
+        R['num_neighbor2test'] = 400
+        # R['num_neighbor2test'] = 500
 
     # ---------------------------- Setup of DNN -------------------------------
     # R['regular_weight_model'] = 'L0'
@@ -520,6 +582,8 @@ if __name__ == "__main__":
     # R['regular_weight_biases'] = 0.00005  # Regularization parameter for weights
     # R['regular_weight_biases'] = 0.00001  # Regularization parameter for weights
     R['regular_weight_biases'] = 0.000001  # Regularization parameter for weights
+
+    R['penalty2true_predict'] = 5
 
     R['init_learning_rate'] = 2e-4                        # 学习率
     R['learning_rate_decay'] = 5e-5                       # 学习率 decay

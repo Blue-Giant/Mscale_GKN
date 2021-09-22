@@ -26,6 +26,25 @@ def pairwise_distance(point_set):
     return point_set_square + point_set_inner + point_set_square_transpose
 
 
+def pairwise_distance_3DTensor(point_set):
+    """Compute pairwise distance of a point cloud.
+        Args:
+          (x-y)^2 = x^2 - 2xy + y^2
+          point_set: tensor (num_points, dims2point)
+        Returns:
+          pairwise distance: (num_points, num_points)
+    """
+    point_set_shape = point_set.get_shape().as_list()
+    assert(len(point_set_shape)) == 3
+
+    point_set_transpose = tf.transpose(point_set, perm=[0, 2, 1])
+    point_set_inner = tf.matmul(point_set, point_set_transpose)
+    point_set_inner = -2 * point_set_inner
+    point_set_square = tf.reduce_sum(tf.square(point_set), axis=-1, keepdims=True)
+    point_set_square_transpose = tf.transpose(point_set_square, perm=[0, 2, 1])
+    return point_set_square + point_set_inner + point_set_square_transpose
+
+
 def np_pairwise_distance(point_set):
     """Compute pairwise distance of a point cloud.
         Args:
@@ -91,25 +110,18 @@ def knn_excludeself(dist_matrix, k=20):
     return nn_idx
 
 
-def get_kneighbors_3D_4DTensor(point_set, nn_idx):
+def get_kneighbors_3DTensor(point_set, nn_idx):
     """Construct neighbors feature for each point
         Args:
-        point_set: (batch_size, num_points, 1, dim)
+        point_set: (batch_size, num_points, dim)
         nn_idx: (batch_size, num_points, k)
         k: int
 
         Returns:
         neighbors features: (batch_size, num_points, k, dim)
       """
-    og_batch_size = point_set.get_shape().as_list()[0]
-    og_num_dims = point_set.get_shape().as_list()[-1]
-    point_set = tf.squeeze(point_set)
-    if og_batch_size == 1:
-        point_set = tf.expand_dims(point_set, 0)
-    if og_num_dims == 1:
-        point_set = tf.expand_dims(point_set, -1)
-
     point_set_shape = point_set.get_shape()
+    assert(len(point_set_shape) == 3)
     batch_size = point_set_shape[0].value
     num_points = point_set_shape[1].value
     num_dims = point_set_shape[2].value
@@ -155,6 +167,24 @@ def cal_attends2neighbors(edge_point_set, dis_model='L1'):
     exp_dis = tf.exp(-norm2edges)                   # (num_points, k_neighbors, 1)
     normalize_exp_dis = tf.nn.softmax(exp_dis, axis=1)
     atten_ceof = tf.transpose(normalize_exp_dis, perm=[0, 2, 1])   # (num_points, 1, k_neighbors)
+    return atten_ceof
+
+
+def cal_attends2neighbors_4D(edge_point_set, dis_model='L1'):
+    """
+    Args:
+        edge_point_set:(batch, num_points, k_neighbors, dim2point)
+        dis_model:
+    return:
+        atten_ceof: (batch, num_points, 1, k_neighbors)
+    """
+    square_edges = tf.square(edge_point_set)            # (batch, num_points, k_neighbors, dim2point)
+    norm2edges = tf.reduce_sum(square_edges, axis=-1, keepdims=True)   # (batch, num_points, k_neighbors, 1)
+    if str.lower(dis_model) == 'l1':
+        norm2edges = tf.sqrt(norm2edges)
+    exp_dis = tf.exp(-norm2edges)                   # (num_points, k_neighbors, 1)
+    normalize_exp_dis = tf.nn.softmax(exp_dis, axis=1)
+    atten_ceof = tf.transpose(normalize_exp_dis, perm=[0, 1, 3,  2])   # (num_points, 1, k_neighbors)
     return atten_ceof
 
 
@@ -374,7 +404,7 @@ def normal_init(in_dim, out_dim, scale_coef=1.0, weight_name='weight'):
 
 
 def Truncated_normal_init_NN(in_size, out_size, hidden_layers, Flag='flag'):
-    with tf.variable_scope('WB_scope', reuse=tf.AUTO_REUSE):
+    with tf.compat.v1.variable_scope('WB_scope', reuse=tf.compat.v1.AUTO_REUSE):
         scale = 5.0
         n_hiddens = len(hidden_layers)
         Weights = []                  # 权重列表，用于存储隐藏层的权重
@@ -401,7 +431,7 @@ def Truncated_normal_init_NN(in_size, out_size, hidden_layers, Flag='flag'):
 
 
 def Xavier_init_NN(in_size, out_size, hidden_layers, Flag='flag', varcoe=0.5):
-    with tf.variable_scope('WB_scope', reuse=tf.AUTO_REUSE):
+    with tf.compat.v1.variable_scope('WB_scope', reuse=tf.compat.v1.AUTO_REUSE):
         n_hiddens = len(hidden_layers)
         Weights = []  # 权重列表，用于存储隐藏层的权重
         Biases = []  # 偏置列表，用于存储隐藏层的偏置
@@ -438,7 +468,7 @@ def Xavier_init_NN(in_size, out_size, hidden_layers, Flag='flag', varcoe=0.5):
 
 
 def Xavier_init_NN_Fourier(in_size, out_size, hidden_layers, Flag='flag', varcoe=0.5):
-    with tf.variable_scope('WB_scope', reuse=tf.AUTO_REUSE):
+    with tf.compat.v1.variable_scope('WB_scope', reuse=tf.compat.v1.AUTO_REUSE):
         n_hiddens = len(hidden_layers)
         Weights = []  # 权重列表，用于存储隐藏层的权重
         Biases = []  # 偏置列表，用于存储隐藏层的偏置

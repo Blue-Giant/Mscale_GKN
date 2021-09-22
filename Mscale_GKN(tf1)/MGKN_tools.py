@@ -67,3 +67,14 @@ def print_and_log_test_one_epoch(mse2test, res2test, log_out=None):
 
     log_string('mean square error of predict and real for testing: %.10f' % mse2test, log_out)
     log_string('residual error of predict and real for testing: %.10f\n\n' % res2test, log_out)
+
+
+def print_and_log_test1epoch(mse2test, res2test, l2rel2test, log_out=None):
+    # 将运行结果打印出来
+    print('mean square error of predict and real for testing: %.10f' % mse2test)
+    print('residual error of predict and real for testing: %.10f' % res2test)
+    print('l2-norm residual error of predict and real for testing: %.10f\n' % l2rel2test)
+
+    log_string('mean square error of predict and real for testing: %.10f' % mse2test, log_out)
+    log_string('residual error of predict and real for testing: %.10f' % res2test, log_out)
+    log_string('l2-norm residual error of predict and real for testing: %.10f\n\n' % l2rel2test, log_out)
