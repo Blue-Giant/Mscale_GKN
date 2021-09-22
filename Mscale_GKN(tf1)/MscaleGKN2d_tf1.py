@@ -60,6 +60,7 @@ def dictionary_out2file(R_dic, log_fileout):
     MGKN_tools.log_string('The num of sampling point for each-batch-train-data: %s\n' % str(R['numSamples2train']), log_fileout)
     MGKN_tools.log_string('The num of neighbors for training process: %s\n' % str(R['num_neighbor2train']), log_fileout)
 
+    MGKN_tools.log_string('The batch-size for testing process: %s\n' % str(R['batch2test']), log_fileout)
     MGKN_tools.log_string('The model for getting test-data: %s\n' % R['getData_model2test'], log_fileout)
     MGKN_tools.log_string('The resolution for test-data: %s\n' % str(R['mesh_number2test']), log_fileout)
     MGKN_tools.log_string(
@@ -83,21 +84,35 @@ def dictionary_out2file(R_dic, log_fileout):
         MGKN_tools.log_string('no activate the stop_step and given_step = default: %s\n' % str(R_dic['max_epoch']), log_fileout)
 
 
-def print_and_log_train_one_epoch(i_epoch, run_time, tmp_lr, pwb, loss_tmp, train_mse_tmp, train_res_tmp, log_out=None):
+def print_and_log_train_one_epoch(i_epoch, run_time, tmp_lr, pwb, loss_tmp, train_mse_tmp, train_res_tmp,
+                                  train_l2rel_tmp, log_out=None):
     # 将运行结果打印出来
     print('train epoch: %d, time: %.3f' % (i_epoch, run_time))
     print('learning rate: %f' % tmp_lr)
     print('weights and biases with  penalty: %f' % pwb)
     print('loss for training: %.10f' % loss_tmp)
-    print('solution mean square error for training: %.10f' % train_mse_tmp)
-    print('solution residual error for training: %.10f\n' % train_res_tmp)
+    print('Mean square error for training: %.10f' % train_mse_tmp)
+    print('Mean square relative error for training: %.10f' % train_res_tmp)
+    print('Mean l2-norm relative error for training: %.10f\n' % train_l2rel_tmp)
 
     MGKN_tools.log_string('train epoch: %d,time: %.3f' % (i_epoch, run_time), log_out)
     MGKN_tools.log_string('learning rate: %f' % tmp_lr, log_out)
     MGKN_tools.log_string('weights and biases with  penalty: %f' % pwb, log_out)
     MGKN_tools.log_string('loss for training: %.10f' % loss_tmp, log_out)
-    MGKN_tools.log_string('solution mean square error for training: %.10f' % train_mse_tmp, log_out)
-    MGKN_tools.log_string('solution residual error for training: %.10f\n' % train_res_tmp, log_out)
+    MGKN_tools.log_string('Mean square error for training: %.10f' % train_mse_tmp, log_out)
+    MGKN_tools.log_string('Mean square relative error for training: %.10f' % train_res_tmp, log_out)
+    MGKN_tools.log_string('Mean l2-norm relative error for training: %.10f\n' % train_l2rel_tmp, log_out)
+
+
+def print_and_log_test1epoch(mse2test, res2test, l2rel2test, log_out=None):
+    # 将运行结果打印出来
+    print('Mean square error of predict and real for testing: %.10f' % mse2test)
+    print('Mean square relative error of predict and real for testing: %.10f' % res2test)
+    print('Mean l2-norm relative error of predict and real for testing: %.10f\n' % l2rel2test)
+
+    MGKN_tools.log_string('Mean square error of predict and real for testing: %.10f' % mse2test, log_out)
+    MGKN_tools.log_string('Mean square relative error of predict and real for testing: %.10f' % res2test, log_out)
+    MGKN_tools.log_string('Mean l2-norm relative error of predict and real for testing: %.10f\n\n' % l2rel2test, log_out)
 
 
 def solve_multiScale_operator(R):
@@ -158,22 +173,40 @@ def solve_multiScale_operator(R):
             Aeps2train = tf.compat.v1.placeholder(tf.float32, name='Aeps2train', shape=[batch2train, point_samples2train, 1])
             in_learning_rate = tf.compat.v1.placeholder_with_default(input=1e-5, shape=[], name='lr')
 
+            adj_matrix2train = DNN_base.pairwise_distance(XY2train)
+            knn_idx2train = DNN_base.knn_includeself(adj_matrix2train, k=R['num_neighbor2train'])
+            neighbors2train = tf.gather(XY2train, knn_idx2train, axis=0)
+            expand_train_point = tf.expand_dims(XY2train, axis=-2)
+            centroid2train = tf.matmul(mat_repeat2it2train, expand_train_point)
+            edges2train = centroid2train - neighbors2train
+
+            # calculating the wight-coefficients of neighbors by edge     # (num_points, 1, k_neighbor)
+            attend_coeff2train = DNN_base.cal_attends2neighbors(edges2train, dis_model='L2')
+
+            centroid_neighbors2train = tf.matmul(centroid2train, mat2cen) + tf.matmul(neighbors2train, mat2nei)
+            if R['model2kernel'] == 'DNN':
+                kernel2train = DNN_base.DNN(centroid_neighbors2train, W2Kernel, B2Kernel, hidden2Kernel,
+                                            activateIn_name=R['actInFunc2kernel'], activate_name=R['actFunc2kernel'],
+                                            activateOut_name=R['actOutFunc2kernel'])
+            elif R['model2kernel'] == 'Scale_DNN':
+                kernel2train = DNN_base.DNN_scale(
+                    centroid_neighbors2train, W2Kernel, B2Kernel, hidden2Kernel, R['freq2kernel'],
+                    activateIn_name=R['actInFunc2kernel'], activate_name=R['actFunc2kernel'],
+                    activateOut_name=R['actOutFunc2kernel'])
+            elif R['model2kernel'] == 'Fourier_DNN':
+                kernel2train = DNN_base.DNN_FourierBase(
+                    centroid_neighbors2train, W2Kernel, B2Kernel, hidden2Kernel, R['freq2kernel'],
+                    activate_name=R['actFunc2kernel'], activateOut_name=R['actOutFunc2kernel'],
+                    sFourier=R['sfourier'])
+
             train_mses = 0
             train_rels = 0
+            train_l2rels = 0
             loss2U = 0
             for i_batch in range(batch2train):
                 sample_train_U = U2train[i_batch, :]
                 sample_train_A = Aeps2train[i_batch, :]
 
-                adj_matrix2train = DNN_base.pairwise_distance(XY2train)
-                knn_idx2train = DNN_base.knn_includeself(adj_matrix2train, k=R['num_neighbor2train'])
-                neighbors2train = tf.gather(XY2train, knn_idx2train, axis=0)
-                expand_train_point = tf.expand_dims(XY2train, axis=-2)
-                centroid2train = tf.matmul(mat_repeat2it2train, expand_train_point)
-                edges2train = centroid2train - neighbors2train
-
-                # calculating the wight-coefficients of neighbors by edge     # (num_points, 1, k_neighbor)
-                attend_coeff2train = DNN_base.cal_attends2neighbors(edges2train, dis_model='L2')
                 XY_Aeps2train = tf.concat([XY2train, sample_train_A], axis=-1)
                 if R['model2input'] == 'DNN':
                     VNN2train = DNN_base.DNN(XY_Aeps2train, W2Input, B2Input, hidden2input,
@@ -188,22 +221,6 @@ def solve_multiScale_operator(R):
                     VNN2train = DNN_base.DNN_FourierBase(
                         XY_Aeps2train, W2Input, B2Input, hidden2input, R['freq2input'], activate_name=R['actFunc2input'],
                         activateOut_name=R['actOutFunc2input'], sFourier=R['sfourier'])
-
-                centroid_neighbors2train = tf.matmul(centroid2train, mat2cen) + tf.matmul(neighbors2train, mat2nei)
-                if R['model2kernel'] == 'DNN':
-                    kernel2train = DNN_base.DNN(centroid_neighbors2train, W2Kernel, B2Kernel, hidden2Kernel,
-                                                activateIn_name=R['actInFunc2kernel'], activate_name=R['actFunc2kernel'],
-                                                activateOut_name=R['actOutFunc2kernel'])
-                elif R['model2kernel'] == 'Scale_DNN':
-                    kernel2train = DNN_base.DNN_scale(
-                        centroid_neighbors2train, W2Kernel, B2Kernel, hidden2Kernel, R['freq2kernel'],
-                        activateIn_name=R['actInFunc2kernel'], activate_name=R['actFunc2kernel'],
-                        activateOut_name=R['actOutFunc2kernel'])
-                elif R['model2kernel'] == 'Fourier_DNN':
-                    kernel2train = DNN_base.DNN_FourierBase(
-                        centroid_neighbors2train, W2Kernel, B2Kernel, hidden2Kernel, R['freq2kernel'],
-                        activate_name=R['actFunc2kernel'], activateOut_name=R['actOutFunc2kernel'],
-                        sFourier=R['sfourier'])
 
                 VNN_nei2train = tf.gather(VNN2train, knn_idx2train, axis=0)
                 kernel_VNN_nei2train = tf.multiply(kernel2train, VNN_nei2train)
@@ -221,6 +238,11 @@ def solve_multiScale_operator(R):
                 rel2train = mse2train/tf.reduce_mean(tf.square(penaltyTP*sample_train_U))
                 train_mses = train_mses + mse2train/(penaltyTP*penaltyTP*batch2train)
                 train_rels = train_rels + rel2train/batch2train
+
+                train_l2Err_fenzi = tf.reduce_mean(tf.square(penaltyTP*UMGKN2train - penaltyTP*sample_train_U))
+                train_l2Err_fenmu = tf.reduce_mean(tf.square(penaltyTP*sample_train_U))
+                train_l2rel = tf.sqrt(train_l2Err_fenzi) / tf.sqrt(train_l2Err_fenmu)
+                train_l2rels = train_l2rels + train_l2rel / batch2train
 
             if R['regular_weight_model'] == 'L1':
                 regular_WB2Input = DNN_base.regular_weights_biases_L1(W2Input, B2Input)  # 正则化权重和偏置 L1正则化
@@ -240,8 +262,8 @@ def solve_multiScale_operator(R):
     with tf.device('/gpu:%s' % (R['gpuNo'])):
         with tf.compat.v1.variable_scope('vscope2test', reuse=tf.compat.v1.AUTO_REUSE):
             XY2test = tf.compat.v1.placeholder(tf.float32, name='XY2test', shape=[point_num2test, input_dim])
-            U2test = tf.compat.v1.placeholder(tf.float32, name='U2test', shape=[point_num2test, 1])
-            Aeps2test = tf.compat.v1.placeholder(tf.float32, name='Aeps2test', shape=[point_num2test, 1])
+            U2test = tf.compat.v1.placeholder(tf.float32, name='U2test', shape=[batch2test, point_num2test, 1])
+            Aeps2test = tf.compat.v1.placeholder(tf.float32, name='Aeps2test', shape=[batch2test, point_num2test, 1])
 
             adj_matrix2test = DNN_base.pairwise_distance(XY2test)
             knn_idx2test = DNN_base.knn_includeself(adj_matrix2test, k=R['num_neighbor2test'])
@@ -252,19 +274,6 @@ def solve_multiScale_operator(R):
 
             # calculating the wight-coefficients of neighbors by edge
             attend_coeff2test = DNN_base.cal_attends2neighbors(edges2test, dis_model='L2')
-            XY_Aeps2test = tf.concat([XY2test, Aeps2test], axis=-1)
-            if R['model2input'] == 'DNN':
-                VNN2test = DNN_base.DNN(XY_Aeps2test, W2Input, B2Input, hidden2input,
-                                        activateIn_name=R['actInFunc2input'], activate_name=R['actFunc2input'],
-                                        activateOut_name=R['actOutFunc2input'])
-            elif R['model2input'] == 'Scale_DNN':
-                VNN2test = DNN_base.DNN_scale(
-                    XY_Aeps2test, W2Input, B2Input, hidden2input, R['freq2input'], activateIn_name=R['actInFunc2input'],
-                    activate_name=R['actFunc2input'], activateOut_name=R['actOutFunc2input'])
-            elif R['model2input'] == 'Fourier_DNN':
-                VNN2test = DNN_base.DNN_FourierBase(
-                    XY_Aeps2test, W2Input, B2Input, hidden2input, R['freq2input'], activate_name=R['actFunc2input'],
-                    activateOut_name=R['actOutFunc2input'], sFourier=R['sfourier'])
 
             centroid_neighbors2test = tf.matmul(centroid2test, mat2cen) + tf.matmul(neighbors2test, mat2nei)
             if R['model2kernel'] == 'DNN':
@@ -282,21 +291,45 @@ def solve_multiScale_operator(R):
                     activate_name=R['actFunc2kernel'], activateOut_name=R['actOutFunc2kernel'],
                     sFourier=R['sfourier'])
 
-            VNN_nei2test = tf.gather(VNN2test, knn_idx2test, axis=0)
-            kernel_VNN_nei2test = tf.multiply(kernel2test, VNN_nei2test)
+            test_mses = 0
+            test_rels = 0
+            test_l2rels = 0
+            for i_batch2test in range(batch2test):
+                sample_test_U = U2test[i_batch2test, :]
+                sample_test_A = Aeps2test[i_batch2test, :]
+                XY_Aeps2test = tf.concat([XY2test, sample_test_A], axis=-1)
+                if R['model2input'] == 'DNN':
+                    VNN2test = DNN_base.DNN(XY_Aeps2test, W2Input, B2Input, hidden2input,
+                                            activateIn_name=R['actInFunc2input'], activate_name=R['actFunc2input'],
+                                            activateOut_name=R['actOutFunc2input'])
+                elif R['model2input'] == 'Scale_DNN':
+                    VNN2test = DNN_base.DNN_scale(
+                        XY_Aeps2test, W2Input, B2Input, hidden2input, R['freq2input'], activateIn_name=R['actInFunc2input'],
+                        activate_name=R['actFunc2input'], activateOut_name=R['actOutFunc2input'])
+                elif R['model2input'] == 'Fourier_DNN':
+                    VNN2test = DNN_base.DNN_FourierBase(
+                        XY_Aeps2test, W2Input, B2Input, hidden2input, R['freq2input'], activate_name=R['actFunc2input'],
+                        activateOut_name=R['actOutFunc2input'], sFourier=R['sfourier'])
 
-            # aggregating neighbors by wight-coefficient
-            attend_solu2test = tf.matmul(attend_coeff2test, kernel_VNN_nei2test)
+                VNN_nei2test = tf.gather(VNN2test, knn_idx2test, axis=0)
+                kernel_VNN_nei2test = tf.multiply(kernel2test, VNN_nei2test)
 
-            # remove the dimension with 1 (num_points, 1)
-            UMGKN2test = tf.squeeze(attend_solu2test, axis=-2)
+                # aggregating neighbors by wight-coefficient
+                attend_solu2test = tf.matmul(attend_coeff2test, kernel_VNN_nei2test)
 
-            test_mse = tf.reduce_mean(tf.square(UMGKN2test - U2test))
-            test_rel = test_mse / tf.reduce_mean(tf.square(U2test))
+                # remove the dimension with 1 (num_points, 1)
+                UMGKN2test = tf.squeeze(attend_solu2test, axis=-2)
 
-            test_l2Err_fenzi = tf.reduce_sum(tf.square(UMGKN2test - U2test))
-            test_l2Err_fenmu = tf.reduce_sum(tf.square(U2test))
-            test_l2rel = tf.sqrt(test_l2Err_fenzi) / tf.sqrt(test_l2Err_fenmu)
+                test_mse = tf.reduce_mean(tf.square(UMGKN2test - sample_test_U))
+                test_rel = test_mse / tf.reduce_mean(tf.square(sample_test_U))
+
+                test_mses = test_mses + test_mse/batch2test
+                test_rels = test_rels + test_rel/batch2test
+
+                test_l2Err_fenzi = tf.reduce_sum(tf.square(UMGKN2test - sample_test_U))
+                test_l2Err_fenmu = tf.reduce_sum(tf.square(sample_test_U))
+                test_l2rel = tf.sqrt(test_l2Err_fenzi) / tf.sqrt(test_l2Err_fenmu)
+                test_l2rels = test_l2rels + test_l2rel/batch2test
 
     # Load the training and testing dataSet
     if R['PDE_type'] == 'pLaplace_implicit':
@@ -359,12 +392,12 @@ def solve_multiScale_operator(R):
         test_data_mesh = train_data_mesh
         shuffle_testData2mesh = test_data_mesh[:, disorder_index2test_data]
 
-    Test_Aeps = np.transpose(shuffle_norm_testData2Aeps, (1, 0))
-    Test_U = np.transpose(shuffle_testData2solu, (1, 0))
+    Test_Aeps = np.expand_dims(shuffle_norm_testData2Aeps, axis=-1)
+    Test_U = np.expand_dims(shuffle_testData2solu, axis=-1)
     mesh2test = np.transpose(shuffle_testData2mesh, (1, 0))
 
     t0 = time.time()
-    loss_all, train_mse_all, train_rel_all = [], [], []  # 空列表, 使用 append() 添加元素
+    loss_all, train_mse_all, train_rel_all, train_l2rel_all = [], [], [], []  # 空列表, 使用 append() 添加元素
     test_mse_all, test_rel_all, test_l2rel_all = [], [], []
     test_epoch = []
 
@@ -388,28 +421,29 @@ def solve_multiScale_operator(R):
             sample_points2train = mesh2train[indexes2sample_point, :]
             samples2sampleBatch_TrainAeps = np.expand_dims(sampleBatch2Train_Aeps[:, indexes2sample_point], axis=-1)
             samples2sampleBatch_TrainU = np.expand_dims(sampleBatch2Train_U[:, indexes2sample_point], axis=-1)
-            _, loss_tmp, train_mse_tmp, train_rel_tmp, pwb = sess.run(
-                [train_my_loss, loss, train_mses, train_rels, PWB],
+            _, loss_tmp, train_mse_tmp, train_rel_tmp, train_l2rel_tmp, pwb = sess.run(
+                [train_my_loss, loss, train_mses, train_rels, train_l2rels, PWB],
                 feed_dict={XY2train: sample_points2train, U2train: samples2sampleBatch_TrainU,
                            Aeps2train: samples2sampleBatch_TrainAeps, in_learning_rate: tmp_lr})
 
             loss_all.append(loss_tmp)
             train_mse_all.append(train_mse_tmp)
             train_rel_all.append(train_rel_tmp)
+            train_l2rel_all.append(train_l2rel_tmp)
 
             if i_epoch % 100 == 0:
                 test_epoch.append(i_epoch / 1000)
                 run_times = time.time() - t0
                 print_and_log_train_one_epoch(i_epoch, run_times, tmp_lr, pwb, loss_tmp, train_mse_tmp, train_rel_tmp,
-                                              log_out=log_fileout)
+                                              train_l2rel_tmp, log_out=log_fileout)
 
                 unn2test, test_mse_tmp, test_rel_tmp, test_l2rel_tmp = sess.run(
-                    [UMGKN2test, test_mse, test_rel, test_l2rel], feed_dict={XY2test: mesh2test, Aeps2test: Test_Aeps,
-                                                                             U2test: Test_U})
+                    [UMGKN2test, test_mses, test_rels, test_l2rels], feed_dict={
+                        XY2test: mesh2test, Aeps2test: Test_Aeps, U2test: Test_U})
                 test_mse_all.append(test_mse_tmp)
                 test_rel_all.append(test_rel_tmp)
                 test_l2rel_all.append(test_l2rel_tmp)
-                MGKN_tools.print_and_log_test1epoch(test_mse_tmp, test_rel_tmp, test_l2rel_tmp, log_out=log_fileout)
+                print_and_log_test1epoch(test_mse_tmp, test_rel_tmp, test_l2rel_tmp, log_out=log_fileout)
 
     # ------------------- save the testing results into mat file and plot them -------------------------
     saveData.save_trainLoss2mat(loss_all, lossName='loss', outPath=R['FolderName'])
@@ -521,32 +555,35 @@ if __name__ == "__main__":
     # R['getData_model2test'] = 'load_test_data'
     R['getData_model2test'] = 'split_train_data'
 
-    R['mesh_number2train'] = 66
-    R['mesh_number2test'] = 66
+    # R['mesh_number2train'] = 66
+    # R['mesh_number2test'] = 66
 
-    # R['mesh_number2train'] = 130
-    # R['mesh_number2test'] = 130
+    R['mesh_number2train'] = 130
+    R['mesh_number2test'] = 130
 
     if 130 == R['mesh_number2train']:
         # R['batch2train'] = 3
         # R['batch2train'] = 10
-        R['batch2train'] = 15
-        R['batch2test'] = 1
+        R['batch2train'] = 20
+        R['batch2test'] = 20
 
         # R['numSamples2train'] = 1000
-        # R['numSamples2train'] = 2000
-        R['numSamples2train'] = 3000
+        # R['numSamples2train'] = 1500
+        R['numSamples2train'] = 2000
+        # R['numSamples2train'] = 3000
         # R['numSamples2train'] = 4000
 
-        # R['num_neighbor2train'] = 250
+        # R['num_neighbor2train'] = 150
+        R['num_neighbor2train'] = 200
+        # R['num_neighbor2train'] = 300
         # R['num_neighbor2train'] = 400
-        R['num_neighbor2train'] = 500
+        # R['num_neighbor2train'] = 500
         # R['num_neighbor2train'] = 1000
-        # R['num_neighbor2train'] = 200
+        #
     elif 66 == R['mesh_number2train']:
         # R['batch2train'] = 3
         R['batch2train'] = 20
-        R['batch2test'] = 1
+        R['batch2test'] = 20
         # R['numSamples2train'] = 1000
         R['numSamples2train'] = 1500
 
@@ -559,8 +596,9 @@ if __name__ == "__main__":
         # R['num_neighbor2test'] = 200
         # R['num_neighbor2test'] = 250
         # R['num_neighbor2test'] = 400
+        R['num_neighbor2test'] = 600
         # R['num_neighbor2test'] = 700
-        R['num_neighbor2test'] = 800
+        # R['num_neighbor2test'] = 800
         # R['num_neighbor2test'] = 900
         # R['num_neighbor2test'] = 1000
         # R['num_neighbor2test'] = 1500
@@ -581,9 +619,12 @@ if __name__ == "__main__":
     # R['regular_weight_biases'] = 0.0001     # Regularization parameter for weights
     # R['regular_weight_biases'] = 0.00005  # Regularization parameter for weights
     # R['regular_weight_biases'] = 0.00001  # Regularization parameter for weights
-    R['regular_weight_biases'] = 0.000001  # Regularization parameter for weights
+    R['regular_weight_biases'] = 0.000005  # Regularization parameter for weights
+    # R['regular_weight_biases'] = 0.000001  # Regularization parameter for weights
 
-    R['penalty2true_predict'] = 5
+    # R['penalty2true_predict'] = 1
+    R['penalty2true_predict'] = 2
+    # R['penalty2true_predict'] = 5
 
     R['init_learning_rate'] = 2e-4                        # 学习率
     R['learning_rate_decay'] = 5e-5                       # 学习率 decay
