@@ -26,6 +26,25 @@ def pairwise_distance(point_set):
     return point_set_square + point_set_inner + point_set_square_transpose
 
 
+def np_pairwise_distance(point_set):
+    """Compute pairwise distance of a point cloud.
+        Args:
+          (x-y)^2 = x^2 - 2xy + y^2
+          point_set: numpy (num_points, dims2point)
+        Returns:
+          pairwise distance: (num_points, num_points)
+    """
+    point_set_shape = point_set.get_shape().as_list()
+    assert(len(point_set_shape)) == 2
+
+    point_set_transpose = tf.transpose(point_set, perm=[1, 0])
+    point_set_inner = tf.matmul(point_set, point_set_transpose)
+    point_set_inner = -2 * point_set_inner
+    point_set_square = tf.reduce_sum(tf.square(point_set), axis=-1, keepdims=True)
+    point_set_square_transpose = tf.transpose(point_set_square, perm=[1, 0])
+    return point_set_square + point_set_inner + point_set_square_transpose
+
+
 def knn_includeself(dist_matrix, k=20):
     """Get KNN based on the pairwise distance.
         How to use tf.nn.top_k(): https://blog.csdn.net/wuguangbin1230/article/details/72820627
@@ -38,6 +57,21 @@ def knn_includeself(dist_matrix, k=20):
       """
     neg_dist = -1.0*dist_matrix
     _, nn_idx = tf.nn.top_k(neg_dist, k=k)  # 这个函数的作用是返回 input 中每行最大的 k 个数，并且返回它们所在位置的索引
+    return nn_idx
+
+
+def np_knn_includeself(dist_matrix, k=20):
+    """Get KNN based on the pairwise distance.
+        How to use tf.nn.top_k(): https://blog.csdn.net/wuguangbin1230/article/details/72820627
+      Args:
+        pairwise distance: (num_points, num_points)
+        k: int
+
+      Returns:
+        nearest neighbors: (num_points, k)
+      """
+    neg_dist = -1.0*dist_matrix
+    _, nn_idx = np.argpartition(neg_dist, k=k)  # 这个函数的作用是返回 input 中每行最大的 k 个数，并且返回它们所在位置的索引
     return nn_idx
 
 
@@ -106,7 +140,7 @@ def get_kneighbors_2DTensor(point_set, nn_idx):
     return point_set_neighbors
 
 
-def cal_attend2neighbors(edge_point_set, dis_model='L1'):
+def cal_attends2neighbors(edge_point_set, dis_model='L1'):
     """
         Args:
         edge_point_set:(num_points, k_neighbors, dim2point)
@@ -114,14 +148,32 @@ def cal_attend2neighbors(edge_point_set, dis_model='L1'):
         return:
         atten_ceof: (num_points, 1, k_neighbors)
     """
-    square_edges = tf.square(edge_point_set)                  # (num_points, k_neighbors, dim2point)
-    norm2edges = tf.reduce_sum(square_edges, axis=-1)         # (num_points, k_neighbors)
+    square_edges = tf.square(edge_point_set)            # (num_points, k_neighbors, dim2point)
+    norm2edges = tf.reduce_sum(square_edges, axis=-1)   # (num_points, k_neighbors)
     if str.lower(dis_model) == 'l1':
         norm2edges = tf.sqrt(norm2edges)
-    exp_dis = tf.exp(-norm2edges)                             # (num_points, k_neighbors)
+    exp_dis = tf.exp(-norm2edges)                   # (num_points, k_neighbors)
     normalize_exp_dis = tf.nn.softmax(exp_dis, axis=-1)
     atten_ceof = tf.expand_dims(normalize_exp_dis, axis=-2)   # (num_points, 1, k_neighbors)
     return atten_ceof
+
+
+def cal_edgesNorm_attends2neighbors(edge_point_set, dis_model='L1', Gauss_normlizeEdge=True):
+    """
+        Args:
+        edge_point_set:(num_points, k_neighbors, dim2point)
+        dis_model:
+        return:
+        atten_ceof: (num_points, 1, k_neighbors)
+    """
+    square_edges = tf.square(edge_point_set)            # (num_points, k_neighbors, dim2point)
+    norm2edges = tf.reduce_sum(square_edges, axis=-1, keepdims=True)   # (num_points, k_neighbors)
+    if str.lower(dis_model) == 'l1':
+        norm2edges = tf.sqrt(norm2edges)
+    exp_dis = tf.exp(-norm2edges)                   # (num_points, k_neighbors)
+    normalize_exp_dis = tf.nn.softmax(exp_dis, axis=1)
+    atten_ceof = tf.transpose(normalize_exp_dis, perm=[0, 2, 1])
+    return norm2edges, atten_ceof
 
 
 class np_GaussianNormalizer(object):
@@ -132,12 +184,18 @@ class np_GaussianNormalizer(object):
         self.std2x = np.std(x, axis=-1, keepdims=True)
         self.eps = eps
 
-    def encode(self, x):
-        x = (x - self.mean2x) / (self.std2x * self.std2x + self.eps)
+    def encode(self, x, bool_var=True):
+        if bool_var:
+            x = (x - self.mean2x) / (self.std2x * self.std2x + self.eps)
+        else:
+            x = (x - self.mean2x) / (self.std2x + self.eps)
         return x
 
-    def decode(self, x, sample_idx=None):
-        x = (x * (self.std2x * self.std2x + self.eps)) + self.mean2x
+    def decode(self, x, bool_var=True):
+        if bool_var:
+            x = (x * (self.std2x * self.std2x + self.eps)) + self.mean2x
+        else:
+            x = (x * (self.std2x + self.eps)) + self.mean2x
         return x
 
 

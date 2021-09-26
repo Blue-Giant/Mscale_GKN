@@ -61,6 +61,8 @@ def dictionary_out2file(R_dic, log_fileout):
                           log_fileout)
     MGKN_tools.log_string('The num of neighbors for training process: %s\n' % str(R['num_neighbor2train']), log_fileout)
 
+    MGKN_tools.log_string('The batch-size for testing process: %s\n' % str(R['batch2test']), log_fileout)
+    MGKN_tools.log_string('The model for getting test-data: %s\n' % R['getData_model2test'], log_fileout)
     MGKN_tools.log_string('The resolution for test-data: %s\n' % str(R['mesh_number2test']), log_fileout)
     MGKN_tools.log_string(
         'The point_num(=res*res) for test-data: %s\n' % str(R['mesh_number2test'] * R['mesh_number2test']), log_fileout)
@@ -85,12 +87,44 @@ def dictionary_out2file(R_dic, log_fileout):
                               log_fileout)
 
 
+def print_and_log_train_one_epoch(i_epoch, run_time, tmp_lr, pwb, loss_tmp, train_mse_tmp, train_res_tmp,
+                                  train_l2rel_tmp, log_out=None):
+    # 将运行结果打印出来
+    print('train epoch: %d, time: %.3f' % (i_epoch, run_time))
+    print('learning rate: %f' % tmp_lr)
+    print('weights and biases with  penalty: %f' % pwb)
+    print('loss for training: %.10f' % loss_tmp)
+    print('Mean square error for training: %.10f' % train_mse_tmp)
+    print('Mean square relative error for training: %.10f' % train_res_tmp)
+    print('Mean l2-norm relative error for training: %.10f\n' % train_l2rel_tmp)
+
+    MGKN_tools.log_string('train epoch: %d,time: %.3f' % (i_epoch, run_time), log_out)
+    MGKN_tools.log_string('learning rate: %f' % tmp_lr, log_out)
+    MGKN_tools.log_string('weights and biases with  penalty: %f' % pwb, log_out)
+    MGKN_tools.log_string('loss for training: %.10f' % loss_tmp, log_out)
+    MGKN_tools.log_string('Mean square error for training: %.10f' % train_mse_tmp, log_out)
+    MGKN_tools.log_string('Mean square relative error for training: %.10f' % train_res_tmp, log_out)
+    MGKN_tools.log_string('Mean l2-norm relative error for training: %.10f\n' % train_l2rel_tmp, log_out)
+
+
+def print_and_log_test1epoch(mse2test, res2test, l2rel2test, log_out=None):
+    # 将运行结果打印出来
+    print('Mean square error of predict and real for testing: %.10f' % mse2test)
+    print('Mean square relative error of predict and real for testing: %.10f' % res2test)
+    print('Mean l2-norm relative error of predict and real for testing: %.10f\n' % l2rel2test)
+
+    MGKN_tools.log_string('Mean square error of predict and real for testing: %.10f' % mse2test, log_out)
+    MGKN_tools.log_string('Mean square relative error of predict and real for testing: %.10f' % res2test, log_out)
+    MGKN_tools.log_string('Mean l2-norm relative error of predict and real for testing: %.10f\n\n' % l2rel2test,
+                          log_out)
+
+
 class Mscale_GKN(tf.keras.Model):
     def __init__(self, in_dim2input=2, out_dim2input=1, hidden2input=None, name2Input_Model='DNN',
                  actInName2input='tanh', actName2input='tanh', actOutName2input='linear', in_dim2kernel=4,
                  outdim2kernel=1, hidden2kernel=None, name2Kernel_Model='DNN', actInName2Kernel='tanh',
                  actName2Kernel='tanh', actOutName2Kernel='tanh', opt2regular_WB='L2', it_neighbor2train=10,
-                 it_neighbor2test=20, type2numeric='float32'):
+                 it_neighbor2test=20, type2numeric='float32', train_batch=10, test_batch=5, penalty2TP=2):
         super(Mscale_GKN, self).__init__()
         self.model2input = DNN_base.Dense_Net(
             indim=in_dim2input, outdim=out_dim2input, hidden_units=hidden2input, name2Model=name2Input_Model,
@@ -111,6 +145,9 @@ class Mscale_GKN(tf.keras.Model):
         self.opt2regular_WB = opt2regular_WB
         self.it_nei2train = it_neighbor2train
         self.it_nei2test = it_neighbor2test
+        self.batch2train = train_batch
+        self.batch2test = test_batch
+        self.penaltyTP = penalty2TP
 
         self.mat2cen = tf.constant([[1, 0, 0, 0],
                                     [0, 1, 0, 0]], dtype=self.float_type)
@@ -121,41 +158,83 @@ class Mscale_GKN(tf.keras.Model):
         self.mat_repeat2it2test = tf.ones([it_neighbor2test, 1], dtype=self.float_type)
 
     # 函数网络的输入既包括点，也包括A(x)，Kernel网络的输入只有点作为输入
-    def train_GKN(self, XY=None, freq2input=None, freq2kernel=None, Utrue=None, Aeps=None):
-        xy_points = tf.cast(XY, dtype=self.float_type)
-        Aeps = tf.cast(Aeps, dtype=self.float_type)
-        adj_matrix = DNN_base.pairwise_distance(xy_points)
-        # knn_idx = GNN_base.knn_excludeself(adj_matrix, k=self.it_nei2train)  # indexes (num_points, k_neighbors)
-        knn_idx = DNN_base.knn_includeself(adj_matrix, k=self.it_nei2train)    # indexes (num_points, k_neighbors)
+    def train_MscaleGKN(self, XY=None, freq2input=None, freq2kernel=None,  Aeps=None, Utrue=None):
+        """
+        Args:
+            XY: [N,D]
+            freq2input:
+            freq2kernel:
+            Utrue: [B,N,1]
+            Aeps:  [B,N,1]
+        return:
+
+        """
+
+        input_points = tf.cast(XY, self.float_type)
+        points_shape = input_points.get_shape().as_list()
+        assert (len(points_shape)) == 2
+        assert (points_shape[1]) == 2
+
+        Aeps = tf.cast(Aeps, self.float_type)
+        Aeps_shape = Aeps.get_shape().as_list()
+        assert (len(Aeps_shape)) == 3
+        assert (Aeps_shape[2]) == 1
+
+        Utrue = tf.cast(Utrue, self.float_type)
+        Utrue_shape = Utrue.get_shape().as_list()
+        assert (len(Utrue_shape)) == 3
+        assert (Utrue_shape[2]) == 1
+
+        adj_matrix = DNN_base.pairwise_distance(input_points)
+        knn_idx = DNN_base.knn_includeself(adj_matrix, k=self.it_nei2train)  # indexes (num_points, k_neighbors)
 
         # obtaining the coord of neighbors according to the corresponding index, then obtaining edge-feature
-        neighbors = tf.gather(xy_points, knn_idx, axis=0)           # coord (num_points, k_neighbors, dim2point)
-        expand_xy = tf.expand_dims(xy_points, axis=-2)              # (num_points,dim2point)-->(num_points,1,dim2point)
-        centroid = tf.matmul(self.mat_repeat2it2train, expand_xy)   # (num_points, k_neighbors, dim2point)
-        edges_feature = centroid - neighbors                        # (num_points, k_neighbors, dim2point)
+        neighbors = tf.gather(input_points, knn_idx, axis=0)          # coord (num_points, k_neighbors, dim2point)
+        expand_input = tf.expand_dims(input_points, axis=-2)          # (num_points,dim2point)->(num_points,1,dim2point)
+        centroid = tf.matmul(self.mat_repeat2it2train, expand_input)  # (num_points, k_neighbors, dim2point)
+        edges_feature = centroid - neighbors                          # (num_points, k_neighbors, dim2point)
 
-        # calculating the wight-coefficients of neighbors by edge
-        attend_coeff2nei = DNN_base.cal_attend2neighbors(edges_feature)         # (num_points, 1, k_neighbor)
-
-        xy_axy = tf.concat([xy_points, Aeps], axis=-1)                             # (num_points, dim+1)
-        VNN = self.model2input(xy_axy, scale=freq2input)                           # (num_points, 1)
-        VNN_neighbors = tf.gather(VNN, knn_idx, axis=0)                            # (num_points, k_neighbors,1)
+        # calculating the wight-coefficients of neighbors by edge     # (num_points, 1, k_neighbor)
+        attend_coeff2nei = DNN_base.cal_attends2neighbors(edges_feature, dis_model='L2')
 
         centroid_neighbors = tf.matmul(centroid, self.mat2cen) + tf.matmul(neighbors, self.mat2nei)
         # (num_points, k_neighbors, 2*dim2xy)-->(num_points, k_neighbors, 1)
         kernel_matrix = self.model2kernel(centroid_neighbors, scale=freq2kernel)
 
-        kernel_matmul_VNN_neighbors = tf.multiply(kernel_matrix, VNN_neighbors)    # (num_points,k_neighbors,1)
+        sum_mse = 0
+        sum_rel = 0
+        sum_l2rel = 0
+        loss2U = 0
+        for i_batch in range(self.batch2train):
+            Ubatch = Utrue[i_batch, :]
+            Abatch = Aeps[i_batch, :]
 
-        # aggregating neighbors by wight-coefficient
-        attend_solu = tf.matmul(attend_coeff2nei, kernel_matmul_VNN_neighbors)
+            XY_Aeps = tf.concat([input_points, Abatch], axis=-1)  # (num_points, dim+1)
+            VNN = self.model2input(XY_Aeps, scale=freq2input)       # (num_points, 1)
+            VNN_neighbors = tf.gather(VNN, knn_idx, axis=0)         # (num_points, k_neighbors,1)
 
-        # remove the dimension with 1 (num_points, 1)
-        UGKN = tf.squeeze(attend_solu, axis=-2)
+            kernel_matmul_VNN_neighbors = tf.multiply(kernel_matrix, VNN_neighbors)  # (num_points,k_neighbors,1)
 
-        Utrue = tf.cast(Utrue, dtype=self.float_type)
-        loss_u = tf.reduce_mean(tf.square(UGKN - Utrue))
-        return loss_u, UGKN
+            # aggregating neighbors by wight-coefficient
+            attend_solu = tf.matmul(attend_coeff2nei, kernel_matmul_VNN_neighbors)
+
+            # remove the dimension with 1 (num_points, 1)
+            UMGKN = tf.squeeze(attend_solu, axis=-2)
+
+            loss2train_U = tf.reduce_mean(tf.square(self.penaltyTP * UMGKN - self.penaltyTP * Ubatch))
+            loss2U = loss2U + loss2train_U / self.batch2train
+
+            mse2train = tf.reduce_mean(tf.square(self.penaltyTP * UMGKN - self.penaltyTP * Ubatch))
+            rel2train = mse2train / tf.reduce_mean(tf.square(self.penaltyTP * Ubatch))
+            sum_mse = sum_mse + mse2train / (self.penaltyTP * self.penaltyTP * self.batch2train)
+            sum_rel = sum_rel + rel2train / self.batch2train
+
+            train_l2Err_fenzi = tf.reduce_mean(tf.square(self.penaltyTP * UMGKN - self.penaltyTP * Ubatch))
+            train_l2Err_fenmu = tf.reduce_mean(tf.square(self.penaltyTP * Ubatch))
+            train_l2rel = tf.sqrt(train_l2Err_fenzi) / tf.sqrt(train_l2Err_fenmu)
+            sum_l2rel = sum_l2rel + train_l2rel / self.batch2train
+
+        return loss2U, sum_mse, sum_rel, sum_l2rel
 
     def get_regular_WB(self):
         regular_sum2WB_input = self.model2input.get_regular_sum2WB(regular_model=self.opt2regular_WB)
@@ -163,38 +242,81 @@ class Mscale_GKN(tf.keras.Model):
         RWB = regular_sum2WB_input + regular_sum2WB_kernnel
         return RWB
 
-    def evaluate_GKN(self, XY=None, freq2input=None, freq2kernel=None, Aeps=None):
-        xy_points = tf.cast(XY, dtype=self.float_type)
-        Aeps = tf.cast(Aeps, dtype=self.float_type)
-        adj_matrix = DNN_base.pairwise_distance(xy_points)
-        # knn_idx = GNN_base.knn_excludeself(adj_matrix, k=self.it_nei2test)  # indexes (num_points, k_neighbors)
-        knn_idx = DNN_base.knn_includeself(adj_matrix, k=self.it_nei2test)    # indexes (num_points, k_neighbors)
+    def elvaute_MscaleGKN(self, XY=None, freq2input=None, freq2kernel=None, Aeps=None, Utrue=None):
+        """
+            Args:
+                XY: [N,D]
+                freq2input:
+                freq2kernel:
+                Utrue: [B,N,1]
+                Aeps:  [B,N,1]
+            return:
+
+        """
+        input_points = tf.cast(XY, self.float_type)
+        points_shape = input_points.get_shape().as_list()
+        assert (len(points_shape)) == 2
+        assert (points_shape[1]) == 2
+
+        Aeps = tf.cast(Aeps, self.float_type)
+        Aeps_shape = Aeps.get_shape().as_list()
+        assert (len(Aeps_shape)) == 3
+        assert (Aeps_shape[2]) == 1
+
+        Utrue = tf.cast(Utrue, self.float_type)
+        Utrue_shape = Utrue.get_shape().as_list()
+        assert (len(Utrue_shape)) == 3
+        assert (Utrue_shape[2]) == 1
+
+        adj_matrix = DNN_base.pairwise_distance(input_points)
+        knn_idx = DNN_base.knn_includeself(adj_matrix, k=self.it_nei2test)  # indexes (num_points, k_neighbors)
 
         # obtaining the coord of neighbors according to the corresponding index, then obtaining edge-feature
-        neighbors = tf.gather(xy_points, knn_idx, axis=0)       # coord (num_points, k_neighbors, dim2point)
-        expand_xy = tf.expand_dims(xy_points, axis=-2)          # (num_points,dim2point)-->(num_points,1,dim2point)
-        centroid = tf.matmul(self.mat_repeat2it2test, expand_xy)        # (num_points, k_neighbors, dim2point)
-        edges_feature = centroid - neighbors                    # (num_points, k_neighbors, dim2point)
+        neighbors = tf.gather(input_points, knn_idx, axis=0)          # coord (num_points, k_neighbors, dim2point)
+        expand_input = tf.expand_dims(input_points, axis=-2)          # (num_points,dim2point)->(num_points,1,dim2point)
+        centroid = tf.matmul(self.mat_repeat2it2test, expand_input)   # (num_points, k_neighbors, dim2point)
+        edges_feature = centroid - neighbors                          # (num_points, k_neighbors, dim2point)
 
         # calculating the wight-coefficients of neighbors by edge
-        attend_coeff2nei = DNN_base.cal_attend2neighbors(edges_feature)             # (num_points, 1, k_neighbor)
-
-        xy_axy = tf.concat([xy_points, Aeps], axis=-1)                             # (num_points, dim+1)
-        VNN = self.model2input(xy_axy, scale=freq2input)                           # (num_points, 1)
-        VNN_neighbors = tf.gather(VNN, knn_idx, axis=0)                            # (num_points, k_neighbors,1)
+        attend_coeff2nei = DNN_base.cal_attends2neighbors(edges_feature, dis_model='L2')  # (num_points, 1, k_neighbor)
 
         centroid_neighbors = tf.matmul(centroid, self.mat2cen) + tf.matmul(neighbors, self.mat2nei)
         # (num_points, k_neighbors, 2*dim2xy)-->(num_points, k_neighbors, 1)
         kernel_matrix = self.model2kernel(centroid_neighbors, scale=freq2kernel)
 
-        kernel_matmul_VNN_neighbors = tf.multiply(kernel_matrix, VNN_neighbors)    # (num_points,k_neighbors,1)
+        sum_mse = 0
+        sum_rel = 0
+        sum_l2rel = 0
 
-        # aggregating neighbors by wight-coefficient
-        attend_solu = tf.matmul(attend_coeff2nei, kernel_matmul_VNN_neighbors)
+        UMGKN_list = []
+        for i_batch in range(self.batch2test):
+            Ubatch = Utrue[i_batch, :]
+            Abatch = Aeps[i_batch, :]
+            XY_Aeps = tf.concat([input_points, Abatch], axis=-1)          # (num_points, dim+1)
+            VNN = self.model2input(XY_Aeps, scale=freq2input)             # (num_points, 1)
+            VNN_neighbors = tf.gather(VNN, knn_idx, axis=0)               # (num_points, k_neighbors,1)
 
-        # remove the dimension with 1 (num_points, 1)
-        UGKN = tf.squeeze(attend_solu, axis=-2)
-        return UGKN
+            kernel_matmul_VNN_neighbors = tf.multiply(kernel_matrix, VNN_neighbors)  # (num_points,k_neighbors,1)
+
+            # aggregating neighbors by wight-coefficient
+            attend_solu = tf.matmul(attend_coeff2nei, kernel_matmul_VNN_neighbors)
+
+            # remove the dimension with 1 (num_points, 1)
+            UMGKN = tf.squeeze(attend_solu, axis=-2)
+
+            mse2test = tf.reduce_mean(tf.square(UMGKN - Ubatch))
+            rel2test = mse2test / tf.reduce_mean(tf.square(Ubatch))
+
+            sum_mse = sum_mse + mse2test / self.batch2test
+            sum_rel = sum_rel + rel2test / self.batch2test
+
+            test_l2Err_fenzi = tf.reduce_sum(tf.square(UMGKN - Ubatch))
+            test_l2Err_fenmu = tf.reduce_sum(tf.square(Ubatch))
+            test_l2rel = tf.sqrt(test_l2Err_fenzi) / tf.sqrt(test_l2Err_fenmu)
+            sum_l2rel = sum_l2rel + test_l2rel / self.batch2test
+            UMGKN_list.append(UMGKN)
+        UMGKN_all = tf.concat(UMGKN_list, axis=-1)
+        return UMGKN_all, sum_mse, sum_rel, sum_l2rel
 
 
 def solve_multiScale_operator(R):
@@ -213,7 +335,8 @@ def solve_multiScale_operator(R):
 
     point_num2train = res2train * res2train
     point_num2test = res2test * res2test
-    numSamples = R['numSamples2train']
+    point_samples2train = R['numSamples2train']
+
     tmp_lr = R['init_learning_rate']
 
     penalty2WB = R['regular_weight_biases']  # Regularization parameter for weights and biases
@@ -222,55 +345,80 @@ def solve_multiScale_operator(R):
     input_dim = R['input_dim']
     out_dim = R['output_dim']
 
-    # 载入数据
+    # Load the training and testing dataSet
     if R['PDE_type'] == 'pLaplace_implicit':
-        # fileName2data = 'data/' + 'res258_a4_f1' + str('.mat')
+        # For example fileName2data = 'data/' + 'res258_a4_f1' + str('.mat')
         if R['equa_name'] == 'multi_scale2D_2':
             fileName2train_data = 'data/' + 'res' + str(res2train) + '_a2_f1_train' + str('.mat')
-            fileName2test_data = 'data/' + 'res' + str(res2test) + '_a2_f1_test' + str('.mat')
+            fileName2test_data = 'data/' + 'res' + str(res2test) + '_a2_f1_train' + str('.mat')
         elif R['equa_name'] == 'multi_scale2D_3':
             fileName2train_data = 'data/' + 'res' + str(res2train) + '_a3_f1_train' + str('.mat')
-            fileName2test_data = 'data/' + 'res' + str(res2test) + '_a3_f1_test' + str('.mat')
+            fileName2test_data = 'data/' + 'res' + str(res2test) + '_a3_f1_train' + str('.mat')
         elif R['equa_name'] == 'multi_scale2D_4':
-            fileName2train_data = 'data/' + 'res' + str(res2train) + '_a4_f1_train' + str('.mat')
-            fileName2test_data = 'data/' + 'res' + str(res2test) + '_a4_f1_test' + str('.mat')
+            fileName2train_data = 'data/sample_data2fine_mesh/' + 'res' + str(res2train) + '_a4_f1_train' + str(
+                '.mat')
+            fileName2test_data = 'data/sample_data2fine_mesh/' + 'res' + str(res2test) + '_a4_f1_train' + str('.mat')
+            fileName2test_index = 'data/sample_data2fine_mesh/' + 'disorder_index' + str(res2test) + str('.mat')
 
-    train_data = matData2pLaplace.load_Matlab_data(fileName2train_data)
-    train_data_Aeps = train_data['meshA']
-    train_data_solu = train_data['meshU']
-    train_data_mesh = train_data['meshXY']
+    train_dataSet = matData2pLaplace.load_Matlab_data(fileName2train_data)
+    train_data_Aeps = train_dataSet['meshA']
+    train_data_solu = train_dataSet['meshU']
+    train_data_mesh = train_dataSet['meshXY']
 
     shape2data = np.shape(train_data_Aeps)
 
-    trans_A2train = np.reshape(train_data_Aeps, newshape=[shape2data[0], res2train * res2train])
-    trans_U2train = np.reshape(train_data_solu, newshape=[shape2data[0], res2train * res2train])
-    trans_mesh2train = np.transpose(train_data_mesh, (1, 0))
+    trainData2Aeps = np.reshape(train_data_Aeps, newshape=[shape2data[0], res2train * res2train])
+    trainData2solu = np.reshape(train_data_solu, newshape=[shape2data[0], res2train * res2train])
+    mesh2train = np.transpose(train_data_mesh, (1, 0))
 
     # 对数据进行归一化处理
-    A_normalizer2train = DNN_base.np_GaussianNormalizer(trans_A2train)
-    normalize_Aeps2train = A_normalizer2train.encode(trans_A2train)
+    trainData2Aeps_normalizer = DNN_base.np_GaussianNormalizer(trainData2Aeps)
+    normalize_trainData2Aeps = trainData2Aeps_normalizer.encode(trainData2Aeps)
 
-    # Train_Aeps = np.reshape(normalize_Aeps2train[0:batch2train, :], newshape=[batch2train, res2train * res2train, 1])
-    # Train_U = np.reshape(trans_U2train[0:batch2train, :], newshape=[batch2train, res2train * res2train, 1])
+    data2indexes = matData2pLaplace.load_Matlab_data(fileName2test_index)
+    disorder_index2test_data = np.reshape(data2indexes['disorder_index'], newshape=(-1))
+    if 'load_test_data' == R['getData_model2test']:
+        max_batch_size2train = shape2data[0]  # 训练集batch size的大小：选为全部batch作为训练集
+        test_dataSet = matData2pLaplace.load_Matlab_data(fileName2test_data)
+        test_data_Aeps = test_dataSet['meshA']
+        test_data_solu = test_dataSet['meshU']
+        test_data_mesh = test_dataSet['meshXY']
 
-    test_data = matData2pLaplace.load_Matlab_data(fileName2test_data)
-    test_data_Aeps = test_data['meshA']
-    test_data_solu = test_data['meshU']
-    test_data_mesh = test_data['meshXY']
+        shape2test_data = np.shape(test_data_Aeps)
 
-    test_trans_A = np.reshape(test_data_Aeps, newshape=[1, res2test * res2test])
-    test_trans_U = np.reshape(test_data_solu, newshape=[1, res2test * res2test])
-    test_trans_mesh = np.transpose(test_data_mesh, (1, 0))
+        testData2Aeps = np.reshape(test_data_Aeps, newshape=[shape2test_data[0], res2test * res2test])
+        testData2solu = np.reshape(test_data_solu, newshape=[shape2test_data[0], res2test * res2test])
 
-    A_normalizer2test = DNN_base.np_GaussianNormalizer(test_trans_A)
-    normalize_Aeps2test = A_normalizer2test.encode(test_trans_A)
+        testData2Aeps_normlizer = DNN_base.np_GaussianNormalizer(testData2Aeps)
+        normalize_testData2Aeps = testData2Aeps_normlizer.encode(testData2Aeps)
 
-    Test_Aeps = np.reshape(normalize_Aeps2test, newshape=[res2test * res2test, 1])
-    Test_U = np.reshape(test_trans_U, newshape=[res2test * res2test, 1])
+        batchSample2normalize_testData2Aeps = normalize_testData2Aeps[450:450 + batch2test, :]
+        batchSample2testData2solu = testData2solu[450:450 + batch2test, :]
+
+        shuffle_norm_testData2Aeps = batchSample2normalize_testData2Aeps[:, disorder_index2test_data]
+        shuffle_testData2solu = batchSample2testData2solu[:, disorder_index2test_data]
+        shuffle_testData2mesh = test_data_mesh[:, disorder_index2test_data]
+    elif 'split_train_data' == R['getData_model2test']:
+        max_batch_size2train = 440  # 训练集batch size的大小：选为前400个数据条目作为训练集
+
+        # temp = np.reshape(normalize_trainData2Aeps[401, :], newshape=[res2test * res2test, 1])
+        # shuffle_temp = temp[disorder_index2test_data, :]
+
+        normalize_testData2Aeps = normalize_trainData2Aeps[450:450 + batch2test, :]
+        testData2solu = trainData2solu[450:450 + batch2test, :]
+
+        shuffle_norm_testData2Aeps = normalize_testData2Aeps[:, disorder_index2test_data]
+        shuffle_testData2solu = testData2solu[:, disorder_index2test_data]
+        test_data_mesh = train_data_mesh
+        shuffle_testData2mesh = test_data_mesh[:, disorder_index2test_data]
+
+    Test_Aeps = np.expand_dims(shuffle_norm_testData2Aeps, axis=-1)
+    Test_U = np.expand_dims(shuffle_testData2solu, axis=-1)
+    mesh2test = np.transpose(shuffle_testData2mesh, (1, 0))
 
     t0 = time.time()
-    loss_all, train_mse_all, train_rel_all = [], [], []  # 空列表, 使用 append() 添加元素
-    test_mse_all, test_rel_all = [], []
+    loss_all, train_mse_all, train_rel_all, train_l2rel_all = [], [], [], []  # 空列表, 使用 append() 添加元素
+    test_mse_all, test_rel_all, test_l2rel_all = [], [], []
     test_epoch = []
 
     mgkn = Mscale_GKN(in_dim2input=input_dim + 1, out_dim2input=out_dim, hidden2input=R['hiddens2input'],
@@ -280,44 +428,32 @@ def solve_multiScale_operator(R):
                       name2Kernel_Model=R['model2kernel'], actInName2Kernel=R['actInFunc2kernel'],
                       actName2Kernel=R['actFunc2kernel'], actOutName2Kernel=R['actOutFunc2kernel'],
                       opt2regular_WB=R['regular_weight_model'], it_neighbor2train=R['num_neighbor2train'],
-                      it_neighbor2test=R['num_neighbor2test'])
+                      it_neighbor2test=R['num_neighbor2test'], train_batch=batch2train, test_batch=batch2test,
+                      penalty2TP=R['penalty2true_predict'])
 
     var_list = mgkn.trainable_variables
     for i_epoch in range(R['max_epoch'] + 1):
         tmp_lr = tmp_lr * (1 - lr_decay)
         my_optimizer = tf.keras.optimizers.Adam(learning_rate=tmp_lr)
         with tf.GradientTape() as tape2loss:
-            train_mses = 0
-            train_rels = 0
-            loss2U = 0
-            for i_batch in range(batch2train):
-                if i_epoch % 100 == 0:
-                    index2sample_batch = np.random.randint(shape2data[0], size=batch2train)
-                    print('The index for sample_batch to train-data: %s\n' % str(index2sample_batch))
-                    MGKN_tools.log_string('The index for sample_batch to train-data: %s\n' % str(index2sample_batch),
-                                          log_fileout)
-                    Train_Aeps = np.reshape(normalize_Aeps2train[index2sample_batch, :],
-                                            newshape=[batch2train, res2train * res2train, 1])
-                    Train_U = np.reshape(trans_U2train[index2sample_batch, :],
-                                         newshape=[batch2train, res2train * res2train, 1])
-                indexes2train = np.random.randint(point_num2train, size=numSamples)
-                train_points = tf.gather(trans_mesh2train, axis=0, indices=indexes2train)
-                train_U = tf.reshape(Train_U[i_batch, :, :], [-1, 1])
-                sample_train_U = tf.gather(train_U, axis=0, indices=indexes2train)
-                train_Aeps = tf.reshape(Train_Aeps[i_batch, :, :], [-1, 1])
-                sample_train_A = tf.gather(train_Aeps, axis=0, indices=indexes2train)
-                loss_epoch, UMGKN2train = mgkn.train_GKN(XY=train_points, freq2input=R['freq2input'],
-                                                         freq2kernel=R['freq2kernel'], Utrue=sample_train_U,
-                                                         Aeps=sample_train_A)
-                loss2U = loss2U + loss_epoch
-                Uexact2train = tf.cast(sample_train_A, dtype=tf.float32)
-                mse2train = tf.reduce_mean(tf.square(UMGKN2train - Uexact2train))
-                rel2train = mse2train / tf.reduce_mean(tf.square(Uexact2train))
-                train_mses = train_mses + mse2train / batch2train
-                train_rels = train_rels + rel2train / batch2train
+            if i_epoch % 100 == 0:
+                index2sample_batch = np.random.randint(max_batch_size2train, size=batch2train)
+                print('The index for sample_batch to train-data: %s\n' % str(index2sample_batch))
+                MGKN_tools.log_string('The index for sample_batch to train-data: %s\n' % str(index2sample_batch),
+                                      log_fileout)
+                sampleBatch2Train_Aeps = normalize_trainData2Aeps[index2sample_batch, :]
+                sampleBatch2Train_U = trainData2solu[index2sample_batch, :]
+            indexes2sample_point = np.random.randint(point_num2train, size=point_samples2train)
+            sample_points2train = mesh2train[indexes2sample_point, :]
+            samples2sampleBatch_TrainAeps = np.expand_dims(sampleBatch2Train_Aeps[:, indexes2sample_point], axis=-1)
+            samples2sampleBatch_TrainU = np.expand_dims(sampleBatch2Train_U[:, indexes2sample_point], axis=-1)
+
+            Loss2U, train_mses, train_rels, train_l2rels = mgkn.train_MscaleGKN(
+                XY=sample_points2train, freq2input=R['freq2input'], freq2kernel=R['freq2kernel'],
+                Utrue=samples2sampleBatch_TrainU, Aeps=samples2sampleBatch_TrainAeps)
             rwb = mgkn.get_regular_WB()
             pwb = penalty2WB*rwb
-            loss = loss2U/batch2train + pwb
+            loss = Loss2U + pwb
             # loss = 10.0 * loss2u + pwb
         grads2loss = tape2loss.gradient(loss, var_list)
         my_optimizer.apply_gradients(zip(grads2loss, var_list))
@@ -325,20 +461,19 @@ def solve_multiScale_operator(R):
         loss_all.append(loss.numpy())
         train_mse_all.append(train_mses.numpy())
         train_rel_all.append(train_rels.numpy())
+        train_l2rel_all.append(train_l2rels.numpy())
 
         if i_epoch % 1000 == 0:
             test_epoch.append(i_epoch / 1000)
             run_times = time.time() - t0
-            MGKN_tools.print_and_log_train_one_epoch(i_epoch, run_times, tmp_lr, pwb.numpy(), loss.numpy(),
-                                                     train_mses.numpy(), train_rels.numpy(), log_out=log_fileout)
-            unn2test = mgkn.evaluate_GKN(XY=test_trans_mesh, freq2input=R['freq2input'], freq2kernel=R['freq2kernel'],
-                                         Aeps=Test_Aeps)
-            Uexact2test = tf.cast(Test_U, dtype=tf.float32)
-            test_mse = tf.reduce_mean(tf.square(unn2test - Uexact2test))
-            test_rel = test_mse / tf.reduce_mean(tf.square(Uexact2test))
-            test_mse_all.append(test_mse.numpy())
-            test_rel_all.append(test_rel.numpy())
-            MGKN_tools.print_and_log_test_one_epoch(test_mse.numpy(), test_rel.numpy(), log_out=log_fileout)
+            print_and_log_train_one_epoch(i_epoch, run_times, tmp_lr, pwb.numpy(), loss.numpy(), train_mses.numpy(),
+                                          train_rels.numpy(), train_l2rels.numpy(), log_out=log_fileout)
+            UMGKN2test, test_mses, test_rels, test_l2rels = mgkn.elvaute_MscaleGKN(
+                XY=mesh2test, freq2input=R['freq2input'], freq2kernel=R['freq2kernel'], Aeps=Test_Aeps, Utrue=Test_U)
+            test_mse_all.append(test_mses.numpy())
+            test_rel_all.append(test_rels.numpy())
+            test_l2rel_all.append(test_l2rels.numpy())
+            print_and_log_test1epoch(test_mses.numpy(), test_rels.numpy(), test_l2rels.numpy(), log_out=log_fileout)
 
     # ------------------- save the testing results into mat file and plot them -------------------------
     saveData.save_trainLoss2mat(loss_all, lossName='loss', outPath=R['FolderName'])
@@ -349,7 +484,7 @@ def solve_multiScale_operator(R):
                                          outPath=R['FolderName'], yaxis_scale=True)
 
     # ----------------------  save testing results to mat files, then plot them --------------------------------
-    saveData.save_2testSolus2mat(Test_U, unn2test.numpy(), actName='utrue', actName1=R['actInFunc2input'],
+    saveData.save_2testSolus2mat(Test_U, UMGKN2test.numpy(), actName='utrue', actName1=R['actInFunc2input'],
                                  outPath=R['FolderName'])
 
     saveData.save_testMSE_REL2mat(test_mse_all, test_rel_all, actName=R['actInFunc2input'], outPath=R['FolderName'])
@@ -358,18 +493,17 @@ def solve_multiScale_operator(R):
 
 
 if __name__ == "__main__":
-    R={}
+    R = {}
     # -------------------------------------- CPU or GPU 选择 -----------------------------------------------
     R['gpuNo'] = 1
     if platform.system() == 'Windows':
         os.environ["CDUA_VISIBLE_DEVICES"] = "%s" % (R['gpuNo'])
     else:
         print('-------------------------------------- linux -----------------------------------------------')
-        # Linux终端没有GUI, 需要添加如下代码，而且必须添加在 import matplotlib.pyplot 之前，否则无效。
         matplotlib.use('Agg')
 
         if tf.test.is_gpu_available():
-            os.environ["CUDA_VISIBLE_DEVICES"] = "0,1"  # 设置当前使用的GPU设备仅为第 0,1,2,3 块GPU, 设备名称为'/gpu:0'
+            os.environ["CUDA_VISIBLE_DEVICES"] = "0,1"  # 设置当前使用的GPU设备仅为第 0,1 块GPU, 设备名称为'/gpu:0'
         else:
             os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 
@@ -386,7 +520,7 @@ if __name__ == "__main__":
         os.mkdir(OUT_DIR)
 
     R['seed'] = np.random.randint(1e5)
-    seed_str = str(R['seed'])                     # int 型转为字符串型
+    seed_str = str(R['seed'])  # int 型转为字符串型
     FolderName = os.path.join(OUT_DIR, seed_str)  # 路径连接
     R['FolderName'] = FolderName
     if not os.path.exists(FolderName):
@@ -409,8 +543,8 @@ if __name__ == "__main__":
         epoch_stop = input('please input a stop epoch:')
         R['max_epoch'] = int(epoch_stop)
 
-    R['input_dim'] = 2                # 输入维数，即问题的维数(几元问题)
-    R['output_dim'] = 1               # 输出维数
+    R['input_dim'] = 2  # 输入维数，即问题的维数(几元问题)
+    R['output_dim'] = 1  # 输出维数
 
     # ---------------------------- Setup of multi-scale problem-------------------------------
     if store_file == 'Laplace2D':
@@ -433,25 +567,93 @@ if __name__ == "__main__":
         # R['equa_name'] = 'multi_scale2D_6'
         # R['equa_name'] = 'multi_scale2D_7'
 
-    # R['getData_model2train'] = 'random_generate'
-    R['getData_model2train'] = 'load_data'
+    if R['PDE_type'] == 'general_Laplace':
+        R['epsilon'] = 0.1
+        R['order2pLaplace_operator'] = 2
+    elif R['PDE_type'] == 'pLaplace_implicit':
+        R['epsilon'] = 0.1
+        R['order2pLaplace_operator'] = 2
+    elif R['PDE_type'] == 'pLaplace_explicit':
+        R['epsilon'] = 0.1
+        R['order2pLaplace_operator'] = 2
 
-    # R['getData_model2test'] = 'random_generate'
-    R['getData_model2test'] = 'load_data'
+    R['getData_model2train'] = 'load_train_data'
 
+    # R['getData_model2test'] = 'load_test_data'
+    R['getData_model2test'] = 'split_train_data'
+
+    # R['mesh_number2train'] = 34
     R['mesh_number2train'] = 66
-    R['mesh_number2test'] = 66
+    # R['mesh_number2train'] = 130
 
-    # R['num_neighbor2train'] = 250
-    # R['num_neighbor2test'] = 100
+    R['mesh_number2test'] = 34
+    # R['mesh_number2test'] = 66
+    # R['mesh_number2test'] = 130
 
-    R['num_neighbor2train'] = 250
-    R['num_neighbor2test'] = 400
+    if R['mesh_number2train'] != R['mesh_number2test']:
+        R['getData_model2test'] = 'load_test_data'
 
-    R['batch2train'] = 50
-    R['batch2test'] = 1
+    if 130 == R['mesh_number2train']:
+        # R['batch2train'] = 3
+        # R['batch2train'] = 10
+        R['batch2train'] = 20
+        R['batch2test'] = 20
 
-    R['numSamples2train'] = 1000
+        # R['numSamples2train'] = 1000
+        R['numSamples2train'] = 1500
+        # R['numSamples2train'] = 2000
+        # R['numSamples2train'] = 3000
+        # R['numSamples2train'] = 4000
+
+        R['num_neighbor2train'] = 150
+        # R['num_neighbor2train'] = 200
+        # R['num_neighbor2train'] = 300
+        # R['num_neighbor2train'] = 400
+        # R['num_neighbor2train'] = 500
+        # R['num_neighbor2train'] = 1000
+        #
+    elif 66 == R['mesh_number2train']:
+        # R['batch2train'] = 3
+        R['batch2train'] = 20
+        R['batch2test'] = 20
+        # R['numSamples2train'] = 1000
+        R['numSamples2train'] = 1500
+
+        R['num_neighbor2train'] = 150
+        # R['num_neighbor2train'] = 200
+        # R['num_neighbor2train'] = 250
+    elif 34 == R['mesh_number2train']:
+        # R['batch2train'] = 3
+        R['batch2train'] = 20
+        R['batch2test'] = 20
+        R['numSamples2train'] = 500
+        # R['numSamples2train'] = 1000
+
+        R['num_neighbor2train'] = 150
+        # R['num_neighbor2train'] = 200
+        # R['num_neighbor2train'] = 250
+
+    if 130 == R['mesh_number2test']:
+        # R['num_neighbor2test'] = 100
+        # R['num_neighbor2test'] = 200
+        # R['num_neighbor2test'] = 250
+        # R['num_neighbor2test'] = 400
+        R['num_neighbor2test'] = 500
+        # R['num_neighbor2test'] = 600
+        # R['num_neighbor2test'] = 700
+        # R['num_neighbor2test'] = 800
+        # R['num_neighbor2test'] = 900
+        # R['num_neighbor2test'] = 1000
+        # R['num_neighbor2test'] = 1500
+    elif 66 == R['mesh_number2test']:
+        # R['num_neighbor2test'] = 100
+        # R['num_neighbor2test'] = 200
+        # R['num_neighbor2test'] = 250
+        R['num_neighbor2test'] = 400
+        # R['num_neighbor2test'] = 500
+    elif 34 == R['mesh_number2test']:
+        # R['num_neighbor2test'] = 100
+        R['num_neighbor2test'] = 200
 
     # ---------------------------- Setup of DNN -------------------------------
     # R['regular_weight_model'] = 'L0'
@@ -463,11 +665,16 @@ if __name__ == "__main__":
     # R['regular_weight_biases'] = 0.0001     # Regularization parameter for weights
     # R['regular_weight_biases'] = 0.00005  # Regularization parameter for weights
     # R['regular_weight_biases'] = 0.00001  # Regularization parameter for weights
-    R['regular_weight_biases'] = 0.000001  # Regularization parameter for weights
+    R['regular_weight_biases'] = 0.000005  # Regularization parameter for weights
+    # R['regular_weight_biases'] = 0.000001  # Regularization parameter for weights
 
-    R['init_learning_rate'] = 2e-4                        # 学习率
-    R['learning_rate_decay'] = 5e-5                       # 学习率 decay
-    R['optimizer_name'] = 'Adam'                          # 优化器
+    # R['penalty2true_predict'] = 1
+    R['penalty2true_predict'] = 2
+    # R['penalty2true_predict'] = 5
+
+    R['init_learning_rate'] = 2e-4  # 学习率
+    R['learning_rate_decay'] = 5e-5  # 学习率 decay
+    R['optimizer_name'] = 'Adam'  # 优化器
 
     R['model2input'] = 'DNN'
     # R['model2input'] = 'Scale_DNN'
@@ -489,6 +696,7 @@ if __name__ == "__main__":
     else:
         R['hiddens2kernel'] = (80, 200, 100, 100, 50)
 
+    # R['actInFunc2input'] = 'relu'
     R['actInFunc2input'] = 'tanh'
     # R['actInFunc2input'] = 'sin'
     # R['actInFunc2input'] = 's2relu'
@@ -526,6 +734,15 @@ if __name__ == "__main__":
     # R['actOutFunc2kernel'] = 'sin'
     # R['actOutFunc2kernel'] = 's2relu'
     # R['actOutFunc2kernel'] = 'sigmoid'
+    # R['actOutFunc2kernel'] = 'softplus'
+
+    if R['model2kernel'] == 'Fourier_DNN' and R['actFunc2kernel'] == 'tanh':
+        R['sfourier'] = 1.0
+    elif R['model2kernel'] == 'Fourier_DNN' and R['actFunc2kernel'] == 's2relu':
+        # R['sfourier'] = 0.5
+        R['sfourier'] = 1.0
+    else:
+        R['sfourier'] = 1.0
 
     R['freq2input'] = np.array([1])
     # R['freq2input'] = np.array([1, 1, 2, 3, 4, 5])
